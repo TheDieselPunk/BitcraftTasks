@@ -10,8 +10,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 API_BASE = 'https://bitjita.com'
 HEADERS = {
+    'User-Agent':        'BitJita (Billard)',
     'x-app-identifier': 'BitcraftTasks',
-    'Accept': 'application/json',
+    'Accept':            'application/json',
 }
 
 
