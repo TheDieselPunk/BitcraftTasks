@@ -3,42 +3,62 @@
 const HEX = '⬡';
 const REFRESH_MS = 5 * 60 * 1000;
 
+const COLS = [
+  { label: 'Traveler',         sort: 'traveler' },
+  { label: 'Items',            sort: null        },
+  { label: 'My Inventory',     sort: null        },
+  { label: 'Nearby Stalls',    sort: null        },
+  { label: 'Market Price',     sort: null        },
+  { label: 'Craftable',        sort: null        },
+  { label: `Reward ${HEX}`,   sort: 'reward'    },
+  { label: `Cost ${HEX}`,     sort: 'cost'      },
+  { label: `Profit ${HEX}`,   sort: 'profit'    },
+];
+
 const S = {
-  player:       null,   // {id, username, locationX, locationZ, regionId, claimName, claimId}
-  tasks:        [],
-  stalls:       [],
-  filterOn:     false,
-  stallRange:   1000,
-  expiry:       null,
-  tasksLoaded:  false,
-  stallsLoaded: false,
-  expiryTimer:    null,
-  refreshTimer:   null,
+  player:        null,
+  tasks:         [],
+  stalls:        [],
+  marketMap:     {},    // item_id → {name, minPrice, totalQty} from nearest market claim
+  marketClaim:   null,  // {claimName, distance, stallCount}
+  sortCol:       'profit',
+  sortAsc:       false,
+  filterOn:      false,
+  stallRange:    1000,
+  expiry:        null,
+  tasksLoaded:   false,
+  stallsLoaded:  false,
+  expiryTimer:   null,
+  refreshTimer:  null,
   refreshCdTimer: null,
-  refreshAt:      null,
+  refreshAt:     null,
 };
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
-const $ = id => document.getElementById(id);
-const usernameInput  = $('username-input');
-const btnSearch      = $('btn-search');
-const playerStrip    = $('player-strip');
-const playerName     = $('player-strip-name');
-const playerDetail   = $('player-strip-detail');
-const expiryCd       = $('expiry-cd');
-const rangeSlider    = $('range-slider');
-const rangeVal       = $('range-val');
-const toolbar        = $('toolbar');
-const btnRefresh     = $('btn-refresh');
-const btnFilter      = $('btn-filter');
-const btnCsv         = $('btn-csv');
-const taskCount      = $('task-count');
-const statusEl       = $('status');
-const refreshCdEl    = $('refresh-cd');
-const cardsWrap      = $('cards-wrap');
-const emptyMsg       = $('empty-msg');
+const $            = id => document.getElementById(id);
+const usernameInput = $('username-input');
+const btnSearch     = $('btn-search');
+const playerStrip   = $('player-strip');
+const psName        = $('ps-name');
+const psDetail      = $('ps-detail');
+const psMarket      = $('ps-market');
+const expiryCd      = $('expiry-cd');
+const rangeSlider   = $('range-slider');
+const rangeVal      = $('range-val');
+const toolbar       = $('toolbar');
+const btnRefresh    = $('btn-refresh');
+const btnFilter     = $('btn-filter');
+const btnCsv        = $('btn-csv');
+const statusEl      = $('status');
+const refreshCdEl   = $('refresh-cd');
+const tblHead       = $('tbl-head');
+const tblBody       = $('tbl-body');
+const mainTbl       = $('main-tbl');
+const emptyMsg      = $('empty-msg');
 
-// ── Event listeners ───────────────────────────────────────────────────────────
+// ── Init ──────────────────────────────────────────────────────────────────────
+buildHeader();
+
 usernameInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 btnSearch.addEventListener('click', doSearch);
 btnRefresh.addEventListener('click', () => load());
@@ -61,19 +81,17 @@ async function doSearch() {
   btnSearch.disabled = true;
   setStatus('Looking up player…');
   clearTimers();
-  cardsWrap.innerHTML = '';
-  emptyMsg.textContent = '';
 
   try {
     const data = await apiFetch(`/api/search?username=${encodeURIComponent(username)}`);
     S.player = data;
 
-    playerName.textContent = data.username;
+    psName.textContent = data.username;
     const parts = [];
     if (data.locationX != null) parts.push(`X ${Math.round(data.locationX)}, Z ${Math.round(data.locationZ)}`);
     if (data.claimName)         parts.push(data.claimName);
     if (data.regionId)          parts.push(`Region ${data.regionId}`);
-    playerDetail.textContent = parts.join(' · ');
+    psDetail.textContent = parts.join(' · ');
 
     playerStrip.classList.add('visible');
     toolbar.classList.add('visible');
@@ -90,12 +108,14 @@ async function load() {
   if (!S.player) return;
   S.tasksLoaded  = false;
   S.stallsLoaded = false;
-  S.tasks  = [];
-  S.stalls = [];
+  S.tasks        = [];
+  S.stalls       = [];
+  S.marketMap    = {};
+  S.marketClaim  = null;
   clearTimers();
   setStatus('Loading…');
-  cardsWrap.innerHTML = '';
   emptyMsg.textContent = '';
+  mainTbl.style.display = 'none';
 
   await Promise.all([
     loadTasks(),
@@ -109,10 +129,11 @@ async function load() {
 async function loadTasks() {
   try {
     const data = await apiFetch(`/api/tasks?player_id=${encodeURIComponent(S.player.id)}`);
-    S.expiry = data.expiry;
-    S.tasks  = data.tasks || [];
+    S.expiry      = data.expiry;
+    S.tasks       = data.tasks || [];
     S.tasksLoaded = true;
     startExpiryCountdown();
+    if (!S.tasks.length) emptyMsg.textContent = 'No incomplete tasks found.';
     render();
   } catch (err) {
     setStatus(`⚠ Tasks: ${err.message}`);
@@ -122,11 +143,26 @@ async function loadTasks() {
 }
 
 async function loadStalls() {
-  const { locationX: x, locationZ: z } = S.player;
+  const { locationX: x, locationZ: z, regionId } = S.player;
   try {
-    const data = await apiFetch(`/api/stalls?x=${x}&z=${z}&range=${S.stallRange}`);
-    S.stalls       = data.stalls || [];
+    const params = [`x=${x}`, `z=${z}`, `range=${S.stallRange}`];
+    if (regionId) params.push(`regionId=${regionId}`);
+    const data = await apiFetch(`/api/stalls?${params.join('&')}`);
+    S.stalls      = data.stalls || [];
     S.stallsLoaded = true;
+
+    // Nearest market
+    if (data.nearestMarket) {
+      S.marketMap   = data.nearestMarket.items || {};
+      S.marketClaim = data.nearestMarket;
+      const dist    = data.nearestMarket.distance;
+      const nm      = data.nearestMarket.claimName;
+      const sc      = data.nearestMarket.stallCount;
+      psMarket.textContent = `⊙ Nearest market: ${nm} (${dist.toLocaleString()} u · ${sc} stall${sc !== 1 ? 's' : ''})`;
+    } else {
+      psMarket.textContent = '';
+    }
+
     render();
   } catch (err) {
     S.stallsLoaded = true;
@@ -134,22 +170,20 @@ async function loadStalls() {
   }
 }
 
-// ── Stall map ─────────────────────────────────────────────────────────────────
+// ── Stall map (nearby) ────────────────────────────────────────────────────────
 function buildStallMap() {
-  // item_id → [{name, owner, claimName, distance, qty, stock, price, price_item}]
   const map = {};
   for (const stall of S.stalls) {
     for (const it of (stall.items || [])) {
       if (!map[it.id]) map[it.id] = [];
       map[it.id].push({
-        name:       stall.name,
-        owner:      stall.owner,
-        claimName:  stall.claimName,
-        distance:   stall.distance,
-        qty:        it.qty,
-        stock:      it.stock,
-        price:      it.price,
-        price_item: it.price_item,
+        name:      stall.name,
+        owner:     stall.owner,
+        claimName: stall.claimName,
+        distance:  stall.distance,
+        qty:       it.qty,
+        stock:     it.stock,
+        price:     it.price,
       });
     }
   }
@@ -162,144 +196,169 @@ function render() {
   if (!S.tasksLoaded) return;
 
   const stallMap = buildStallMap();
-  let tasks = S.tasks.map(t => decorateTask(t, stallMap));
+  let tasks = [...S.tasks].map(t => decorateTask(t, stallMap));
 
-  // Sort by profit desc, then reward desc
   tasks.sort((a, b) => {
-    const pa = a.profit ?? -Infinity, pb = b.profit ?? -Infinity;
-    if (pa !== pb) return pb - pa;
-    return (b.reward || 0) - (a.reward || 0);
+    const va = sortVal(a), vb = sortVal(b);
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    const cmp = typeof va === 'string' ? va.localeCompare(vb) : va - vb;
+    return S.sortAsc ? cmp : -cmp;
   });
 
   if (S.filterOn) tasks = tasks.filter(isCompletable);
 
   if (!tasks.length) {
-    emptyMsg.textContent = S.tasks.length
-      ? (S.filterOn ? 'No completable tasks found.' : 'No incomplete tasks found.')
-      : 'No tasks returned.';
-    cardsWrap.innerHTML = '';
-    taskCount.textContent = '';
+    emptyMsg.textContent = S.filterOn ? 'No completable tasks found.' : (S.tasks.length ? '' : 'No incomplete tasks found.');
+    mainTbl.style.display = 'none';
     return;
   }
 
   emptyMsg.textContent = '';
-  taskCount.textContent = `${tasks.length} task${tasks.length !== 1 ? 's' : ''}`;
-  cardsWrap.innerHTML = tasks.map(renderCard).join('');
+  mainTbl.style.display = '';
+  tblBody.innerHTML = tasks.map(renderRow).join('');
 }
 
 function decorateTask(task, stallMap) {
   const items = task.items.map(item => {
-    const matches = (stallMap[item.id] || []).filter(e => e.qty >= item.qty || e.stock == null || e.stock >= item.qty);
-    return { ...item, stall_matches: matches };
+    const nearby  = (stallMap[item.id] || []).filter(e => (e.stock == null || e.stock >= item.qty) && e.qty >= item.qty);
+    const market  = S.marketMap[item.id] || null;
+    return { ...item, stall_matches: nearby, market };
   });
 
+  // Cost: use market price if available, else cheapest nearby stall
   let totalCost = 0, costKnown = true;
   for (const item of items) {
-    const best = item.stall_matches.find(m => m.price != null);
-    if (best) totalCost += best.price * item.qty;
-    else       costKnown = false;
+    const mp = item.market?.minPrice;
+    const sp = item.stall_matches[0]?.price;
+    const price = mp ?? sp ?? null;
+    if (price != null) totalCost += price * item.qty;
+    else costKnown = false;
   }
-
-  const hasAnyStall = items.some(i => i.stall_matches.length > 0);
-  const cost   = costKnown && hasAnyStall ? totalCost : null;
+  const hasSource = items.some(i => i.stall_matches.length > 0 || i.market);
+  const cost   = costKnown && hasSource ? totalCost : null;
   const profit = cost != null ? task.reward - cost : null;
 
   return { ...task, items, cost, profit };
 }
 
+function sortVal(task) {
+  switch (S.sortCol) {
+    case 'traveler': return task.traveler;
+    case 'reward':   return task.reward;
+    case 'cost':     return task.cost;
+    case 'profit':   return task.profit;
+    default:         return null;
+  }
+}
+
 function isCompletable(task) {
   return task.items.every(item =>
     item.inv_have >= item.qty ||
-    item.stall_matches.length > 0 ||
+    (item.stall_matches || []).length > 0 ||
+    item.market != null ||
     item.craft_info?.status === 'yes'
   );
 }
 
-// ── Card renderer ─────────────────────────────────────────────────────────────
-function renderCard(task) {
-  const initial = (task.traveler || '?')[0].toUpperCase();
+// ── Row renderer ──────────────────────────────────────────────────────────────
+function renderRow(task) {
+  // Items column
+  const itemsHtml = task.items.map(i => {
+    const tag = i.type === 'cargo' ? ` <span class="type-tag">cargo</span>` : '';
+    return `<span class="qty">${i.qty.toLocaleString()}×</span> ${esc(i.name)}${tag}`;
+  }).join('<br>');
 
-  const itemsHtml = task.items.map(item => {
-    // Inventory row
-    const invClass = !item.inv_have ? 'val-no'
-                   : item.inv_have >= item.qty ? 'val-ok' : 'val-part';
-    const invText  = item.inv_have
-      ? `${item.inv_have.toLocaleString()} / ${item.qty.toLocaleString()} in inventory`
-      : 'Not in inventory';
+  // Inventory column
+  const invHtml = task.items.map(item => {
+    if (!item.inv_have) return `<span class="dim">—</span>`;
+    const cls = item.inv_have >= item.qty ? 'inv-ok' : 'inv-part';
+    const tip = `${item.inv_have.toLocaleString()} / ${item.qty.toLocaleString()} needed`;
+    return `<span class="${cls}" title="${esc(tip)}">${item.inv_have.toLocaleString()}</span>`;
+  }).join('<br>');
 
-    // Stall row
-    let stallHtml = '';
-    if (!S.stallsLoaded) {
-      stallHtml = `<div class="meta-row"><span class="meta-icon">⊙</span><span class="loading">Loading stalls…</span></div>`;
-    } else if (item.stall_matches.length) {
-      const m     = item.stall_matches[0];
-      const label = m.claimName || m.name || m.owner;
-      const dist  = `${m.distance.toLocaleString()} u`;
-      const price = m.price != null
-        ? `<span class="val-gold">${HEX}${m.price.toLocaleString()}</span> ea · `
-        : '';
-      const extra = item.stall_matches.length > 1
-        ? ` <span class="val-no">+${item.stall_matches.length - 1} more</span>` : '';
-      stallHtml = `<div class="meta-row"><span class="meta-icon">⊙</span><span class="meta-text"><span class="val-stall">${esc(label)}</span> · ${price}<span class="val-no">${dist}</span>${extra}</span></div>`;
-    } else {
-      stallHtml = `<div class="meta-row"><span class="meta-icon">⊙</span><span class="val-no">No nearby stalls</span></div>`;
-    }
+  // Nearby stalls column
+  const stallHtml = task.items.map(item => {
+    if (!S.stallsLoaded) return '<span class="dim">⏳</span>';
+    const matches = item.stall_matches || [];
+    if (!matches.length) return `<span class="na">—</span>`;
+    const shown = matches.slice(0, 2);
+    const extra = matches.length - 2;
+    const lines = shown.map(m => {
+      const label    = m.claimName || m.name;
+      const priceStr = m.price != null ? ` <span class="sub">${HEX}${m.price.toLocaleString()}</span>` : '';
+      const distStr  = `<span class="sub">${m.distance.toLocaleString()}u</span>`;
+      return `<span class="stall-name">${esc(label)}</span>${priceStr} ${distStr}`;
+    });
+    if (extra > 0) lines.push(`<span class="sub">+${extra} more</span>`);
+    return lines.join('<br>');
+  }).join('<br>');
 
-    // Craft row
-    let craftHtml = '';
+  // Market price column (nearest claim)
+  const marketHtml = task.items.map(item => {
+    if (!S.stallsLoaded) return '<span class="dim">⏳</span>';
+    const m = item.market;
+    if (!m) return `<span class="na">—</span>`;
+    const price = m.minPrice != null
+      ? `<span class="market-price">${HEX}${m.minPrice.toLocaleString()}</span>`
+      : `<span class="dim">no price</span>`;
+    return price;
+  }).join('<br>');
+
+  // Craftable column
+  const craftHtml = task.items.map(item => {
     const ci = item.craft_info;
-    if (ci && ci.status !== 'none') {
-      const tip = (ci.details || []).map(d => `${d.name}: ${d.have}/${d.need}`).join(', ');
-      const bld = ci.building ? ` · ${esc(ci.building)}` : '';
-      const cls = ci.status === 'yes' ? 'val-ok' : ci.status === 'partial' ? 'val-part' : 'val-no';
-      const sym = ci.status === 'yes' ? '✓' : ci.status === 'partial' ? '~' : '✗';
-      craftHtml = `<div class="meta-row"><span class="meta-icon">⚒</span><span class="${cls}" title="${esc(tip)}">${sym} Craftable${bld}</span></div>`;
-    }
+    if (!ci || ci.status === 'none') return `<span class="craft-no">—</span>`;
+    const tip = (ci.details || []).map(d =>
+      `${d.name}: ${d.have.toLocaleString()} / ${d.need.toLocaleString()}`
+    ).join('\n');
+    const bld = ci.building ? ` <span class="sub">(${esc(ci.building)})</span>` : '';
+    if (ci.status === 'yes')     return `<span class="craft-ok" title="${esc(tip)}">✓${bld}</span>`;
+    if (ci.status === 'partial') return `<span class="inv-part" title="${esc(tip)}">~${bld}</span>`;
+    return `<span class="craft-no" title="${esc(tip)}">✗${bld}</span>`;
+  }).join('<br>');
 
-    const typeTag = item.type === 'cargo'
-      ? `<span class="item-type">cargo</span>` : '';
+  const costStr    = task.cost   != null ? `${HEX} ${task.cost.toLocaleString()}`   : `<span class="dim">—</span>`;
+  const profitStr  = task.profit != null ? `${HEX} ${task.profit.toLocaleString()}` : `<span class="dim">—</span>`;
+  const profitCls  = task.profit == null ? '' : task.profit >= 0 ? ' profit-pos' : ' profit-neg';
 
-    return `<div class="item-block">
-      <div class="item-row">
-        <span class="item-qty">${item.qty.toLocaleString()}×</span>
-        <span class="item-name">${esc(item.name)}</span>${typeTag}
-      </div>
-      <div class="item-meta">
-        <div class="meta-row"><span class="meta-icon">⊞</span><span class="${invClass}">${invText}</span></div>
-        ${stallHtml}${craftHtml}
-      </div>
-    </div>`;
+  return `<tr class="task-row">
+    <td class="c-traveler">${esc(task.traveler)}</td>
+    <td class="c-items">${itemsHtml}</td>
+    <td class="c-inv">${invHtml}</td>
+    <td class="c-stalls">${stallHtml}</td>
+    <td class="c-market">${marketHtml}</td>
+    <td class="c-craft">${craftHtml}</td>
+    <td class="c-num">${HEX} ${task.reward.toLocaleString()}</td>
+    <td class="c-num">${costStr}</td>
+    <td class="c-num${profitCls}">${profitStr}</td>
+  </tr>`;
+}
+
+// ── Table header ──────────────────────────────────────────────────────────────
+function buildHeader() {
+  const tr = document.createElement('tr');
+  tr.innerHTML = COLS.map(c => {
+    const active = c.sort === S.sortCol;
+    const ind    = active ? (S.sortAsc ? ' ↑' : ' ↓') : '';
+    return `<th${c.sort ? ` class="sortable" data-sort="${c.sort}"` : ''}>${esc(c.label + ind)}</th>`;
   }).join('');
+  tblHead.appendChild(tr);
 
-  const costStr   = task.cost   != null ? `Cost: ${HEX}${task.cost.toLocaleString()}` : '';
-  const profitCls = task.profit == null ? '' : task.profit >= 0 ? 'profit-pos' : 'profit-neg';
-  const profitStr = task.profit != null
-    ? `<span class="footer-profit ${profitCls}">${task.profit >= 0 ? '+' : ''}${HEX}${task.profit.toLocaleString()}</span>`
-    : '';
-
-  const completable = isCompletable(task);
-  const completeDot = completable
-    ? `<span title="Completable" style="color:var(--green);font-size:.8rem;">●</span>`
-    : `<span title="Not completable" style="color:var(--text-dim);font-size:.8rem;">○</span>`;
-
-  return `<div class="task-card">
-    <div class="card-header">
-      <span class="card-label">Traveler Task ${completeDot}</span>
-      <span class="card-reward">${HEX} ${task.reward.toLocaleString()}</span>
-    </div>
-    <div class="card-traveler">
-      <div class="traveler-icon">${esc(initial)}</div>
-      <div>
-        <div class="traveler-name">${esc(task.traveler)}</div>
-      </div>
-    </div>
-    <div class="card-divider"></div>
-    <div class="card-items">${itemsHtml}</div>
-    <div class="card-footer">
-      <span class="footer-cost">${costStr}</span>
-      ${profitStr}
-    </div>
-  </div>`;
+  tblHead.querySelectorAll('th.sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.sort;
+      S.sortAsc = S.sortCol === col ? !S.sortAsc : false;
+      S.sortCol = col;
+      tblHead.querySelectorAll('th.sortable').forEach(h => {
+        const c   = COLS.find(x => x.sort === h.dataset.sort);
+        const act = h.dataset.sort === S.sortCol;
+        h.textContent = (c?.label || '') + (act ? (S.sortAsc ? ' ↑' : ' ↓') : '');
+      });
+      render();
+    });
+  });
 }
 
 // ── Timers ────────────────────────────────────────────────────────────────────
@@ -347,16 +406,17 @@ function scheduleRefresh() {
 
 // ── CSV export ────────────────────────────────────────────────────────────────
 function downloadCsv() {
-  const q  = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+  const q       = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
   const stallMap = buildStallMap();
-  const rows = [['Traveler','Item','Qty','Type','Inv Have','Best Stall','Stall Price','Stall Dist','Craftable','Reward','Cost','Profit'].join(',')];
+  const rows    = [['Traveler','Item','Qty','Type','Inv Have','Nearby Stall','Stall Price','Stall Dist','Market Price','Craftable','Reward','Cost','Profit'].join(',')];
   for (const task of S.tasks) {
     const dt = decorateTask(task, stallMap);
     for (const item of dt.items) {
-      const best = item.stall_matches[0];
+      const best = item.stall_matches?.[0];
       rows.push([
         q(task.traveler), q(item.name), item.qty, item.type, item.inv_have,
         q(best?.claimName || best?.name || ''), best?.price ?? '', best?.distance ?? '',
+        item.market?.minPrice ?? '',
         item.craft_info?.status || '', task.reward, dt.cost ?? '', dt.profit ?? '',
       ].join(','));
     }
