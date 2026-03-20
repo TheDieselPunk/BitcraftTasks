@@ -6,7 +6,6 @@ import json
 import math
 import urllib.request
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 API_BASE = 'https://bitjita.com'
 HEADERS = {
@@ -27,23 +26,21 @@ def api_get(path, params=None):
 
 def cors_headers():
     return {
-        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Origin':  '*',
         'Access-Control-Allow-Methods': 'GET, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type',
-        'Content-Type': 'application/json',
+        'Content-Type':                 'application/json',
     }
 
 
 def get_player(username):
     """
-    Search for a player by username.
-    Returns {id, username, position: {n, e}} or None if not found.
-    Position is extracted from the player record if available.
+    Two-step lookup: search by username → full profile for position.
+    Returns {id, username, locationX, locationZ, regionId, claimName, claimId} or None.
     """
-    data = api_get('/api/players', {'q': username, 'limit': 5})
+    data    = api_get('/api/players', {'q': username, 'limit': 5})
     players = data.get('players', [])
-    # Prefer exact case-insensitive match
-    match = next((p for p in players if p.get('username', '').lower() == username.lower()), None)
+    match   = next((p for p in players if p.get('username', '').lower() == username.lower()), None)
     if not match and players:
         match = players[0]
     if not match:
@@ -51,22 +48,25 @@ def get_player(username):
 
     player_id = str(match['entityId'])
 
-    # Extract position — may be under 'position', 'location', or top-level n/e fields
-    pos = match.get('position') or match.get('location') or {}
-    n = pos.get('n') or pos.get('northing') or match.get('n') or match.get('northing')
-    e = pos.get('e') or pos.get('easting')  or match.get('e') or match.get('easting')
+    profile = api_get(f'/api/players/{player_id}')
+    p       = profile.get('player', {})
+    loc     = p.get('location') or {}
 
     return {
-        'id':       player_id,
-        'username': match.get('username', username),
-        'position': {'n': n, 'e': e},
+        'id':        player_id,
+        'username':  p.get('username', username),
+        'locationX': p.get('locationX'),
+        'locationZ': p.get('locationZ'),
+        'regionId':  p.get('regionId'),
+        'claimName': loc.get('name'),
+        'claimId':   str(loc['entityId']) if loc.get('entityId') else None,
     }
 
 
 def build_inv_map(inv_data):
     """
     Build {item_id_str: total_qty} from a player inventories response.
-    Counts across all inventory bags.
+    Counts across all inventory bags/pockets.
     """
     totals = {}
     for bag in inv_data.get('inventories', []):
@@ -83,6 +83,7 @@ def build_name_maps(items_data, cargo_data):
     """
     Build {id_str: name_str} maps from /api/items and /api/cargo responses.
     Handles both array [{id, name}] and dict {id: {name}} formats.
+    Also handles the tasks-embedded catalog format {id: {name, ...}}.
     """
     def _parse(data):
         m = {}
@@ -96,6 +97,8 @@ def build_name_maps(items_data, cargo_data):
             for k, v in data.items():
                 if isinstance(v, dict) and v.get('name'):
                     m[str(k)] = v['name']
+                elif isinstance(v, str):
+                    m[str(k)] = v
         return m
 
     return _parse(items_data), _parse(cargo_data)
@@ -103,7 +106,7 @@ def build_name_maps(items_data, cargo_data):
 
 def get_craft_info(item_id, item_type, needed_qty, inv_map, items_map, cargo_map):
     """
-    Fetch crafting recipe for one item and check inventory against ingredients.
+    Fetch crafting recipe and check inventory against ingredients.
     Returns {status: 'yes'|'partial'|'no'|'none', details: [...], building: str}.
     """
     endpoint = f'/api/cargo/{item_id}' if item_type == 'cargo' else f'/api/items/{item_id}'
@@ -116,7 +119,6 @@ def get_craft_info(item_id, item_type, needed_qty, inv_map, items_map, cargo_map
     if not recipes:
         return {'status': 'none', 'details': [], 'building': ''}
 
-    # Prefer a recipe that explicitly produces this item
     recipe = next(
         (r for r in recipes if any(str(o.get('item_id')) == item_id for o in r.get('craftedItemStacks', []))),
         recipes[0]
@@ -149,5 +151,5 @@ def get_craft_info(item_id, item_type, needed_qty, inv_map, items_map, cargo_map
     return {'status': status, 'details': details, 'building': recipe.get('buildingName', '')}
 
 
-def distance(n1, e1, n2, e2):
-    return math.sqrt((n2 - n1) ** 2 + (e2 - e1) ** 2)
+def distance(x1, z1, x2, z2):
+    return math.sqrt((x2 - x1) ** 2 + (z2 - z1) ** 2)

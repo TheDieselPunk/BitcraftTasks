@@ -7,186 +7,290 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    :root {
+      --bg:        #07070f;
+      --panel:     #0d0d1e;
+      --panel2:    #11112a;
+      --border:    #1e1e45;
+      --border2:   #2a2a5a;
+      --gold:      #f0a500;
+      --gold2:     #ffc030;
+      --gold-dim:  #7a5200;
+      --teal:      #5bc8e8;
+      --green:     #52c46a;
+      --red:       #e05050;
+      --purple:    #b47cff;
+      --text:      #c8c8dc;
+      --text-dim:  #555570;
+      --text-mid:  #8888aa;
+      --card-w:    340px;
+    }
+
     body {
-      font-family: system-ui, sans-serif;
-      background: #0d0d1a;
-      color: #ccc;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
       min-height: 100vh;
-      padding: 24px 16px 48px;
+      padding: 0 0 64px;
     }
 
-    h1 {
-      font-size: 1.3rem;
-      color: #f0a500;
-      letter-spacing: .04em;
-      margin-bottom: 20px;
+    /* ── Top bar ── */
+    #topbar {
+      background: var(--panel);
+      border-bottom: 2px solid var(--border2);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      flex-wrap: wrap;
     }
-    h1 span { color: #555; font-weight: 400; font-size: .85rem; }
+    #logo {
+      font-size: 1.1rem;
+      font-weight: 800;
+      letter-spacing: .12em;
+      color: var(--gold);
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    #logo span { color: var(--text-dim); font-weight: 400; font-size: .75rem; letter-spacing: .06em; }
 
-    /* ── Search bar ── */
     #search-row {
       display: flex;
       gap: 8px;
-      max-width: 480px;
-      margin-bottom: 16px;
+      flex: 1;
+      max-width: 380px;
     }
     #search-row input {
       flex: 1;
-      padding: 8px 12px;
-      border-radius: 6px;
-      border: 1px solid #2a2a50;
-      background: #12121e;
-      color: #ddd;
-      font-size: .9rem;
-    }
-    #search-row input:focus { outline: none; border-color: #f0a500; }
-    #search-row button {
-      padding: 8px 18px;
-      border: none;
-      border-radius: 6px;
-      background: #f0a500;
-      color: #0d0d1a;
-      font-weight: 700;
-      cursor: pointer;
+      padding: 7px 12px;
+      border-radius: 5px;
+      border: 1px solid var(--border2);
+      background: #09091a;
+      color: var(--text);
       font-size: .85rem;
     }
-    #search-row button:hover { background: #ffc030; }
-    #search-row button:disabled { opacity: .5; cursor: default; }
+    #search-row input:focus { outline: none; border-color: var(--gold); }
+    #search-row button {
+      padding: 7px 18px;
+      border: none;
+      border-radius: 5px;
+      background: var(--gold);
+      color: #07070f;
+      font-weight: 800;
+      font-size: .8rem;
+      cursor: pointer;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+    #search-row button:hover { background: var(--gold2); }
+    #search-row button:disabled { opacity: .4; cursor: default; }
 
-    /* ── Player card ── */
-    #player-card {
+    /* ── Player info strip ── */
+    #player-strip {
       display: none;
+      background: var(--panel2);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 24px;
+      gap: 24px;
       align-items: center;
-      gap: 16px;
-      background: #12121e;
-      border: 1px solid #2a2a50;
-      border-radius: 8px;
-      padding: 12px 16px;
-      margin-bottom: 14px;
-      max-width: 720px;
       flex-wrap: wrap;
     }
-    #player-card.visible { display: flex; }
-    #player-name  { font-weight: 700; color: #f0a500; font-size: .95rem; }
-    #player-pos   { font-size: .8rem; color: #7ec8e3; }
-    #range-group  { display: flex; align-items: center; gap: 8px; font-size: .8rem; color: #888; margin-left: auto; }
-    #range-group input[type=range] { width: 120px; accent-color: #f0a500; }
-    #range-val    { color: #f0a500; font-weight: 700; min-width: 40px; }
+    #player-strip.visible { display: flex; }
+    #player-strip-name   { font-weight: 800; color: var(--gold); font-size: 1rem; letter-spacing: .08em; text-transform: uppercase; }
+    #player-strip-detail { font-size: .75rem; color: var(--text-mid); }
+    #expiry-cd           { font-size: .82rem; font-weight: 700; }
+    .cd-ok    { color: var(--teal); }
+    .cd-warn  { color: var(--gold); }
+    .cd-urgent{ color: var(--red); animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+    #range-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: .75rem;
+      color: var(--text-mid);
+      margin-left: auto;
+    }
+    #range-group input[type=range] { width: 110px; accent-color: var(--gold); }
+    #range-val { color: var(--gold); font-weight: 700; min-width: 36px; }
 
     /* ── Toolbar ── */
     #toolbar {
       display: none;
-      gap: 6px;
-      margin-bottom: 12px;
-      flex-wrap: wrap;
+      padding: 10px 24px;
+      gap: 8px;
       align-items: center;
+      flex-wrap: wrap;
+      border-bottom: 1px solid var(--border);
     }
     #toolbar.visible { display: flex; }
     #toolbar button {
-      padding: 4px 12px;
-      border: none;
-      border-radius: 5px;
+      padding: 5px 14px;
+      border: 1px solid var(--border2);
+      border-radius: 4px;
       cursor: pointer;
-      font-size: .75rem;
-      font-weight: 600;
+      font-size: .72rem;
+      font-weight: 700;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+      background: var(--panel2);
+      color: var(--text-mid);
     }
-    #btn-refresh  { background: #1a3a5c; color: #fff; }
-    #btn-filter   { background: #252535; color: #999; font-weight: 400; }
-    #btn-filter.active { background: #1a4a1a; color: #7cfc00; font-weight: 700; }
-    #btn-csv      { background: #1a5c35; color: #fff; }
-    #status       { font-size: .72rem; color: #777; margin-left: 4px; }
-    #refresh-cd   { font-size: .7rem; color: #3a3a55; margin-left: auto; }
-    #expiry-cd    { font-size: .82rem; font-weight: 600; }
-    .cd-ok        { color: #7ec8e3; }
-    .cd-urgent    { color: #e05050; animation: pulse 1s infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    #toolbar button:hover { border-color: var(--gold); color: var(--gold); }
+    #btn-filter.active { background: #0d2a0d; border-color: var(--green); color: var(--green); }
+    #task-count  { font-size: .75rem; color: var(--text-mid); font-weight: 600; }
+    #status      { font-size: .72rem; color: var(--text-dim); margin-left: 4px; }
+    #refresh-cd  { font-size: .7rem; color: var(--text-dim); margin-left: auto; }
 
-    /* ── Table ── */
-    #tbl-wrap {
-      overflow-x: auto;
+    /* ── Cards grid ── */
+    #cards-wrap {
+      padding: 24px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      align-items: flex-start;
     }
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      font-size: .78rem;
-      min-width: 860px;
-    }
-    thead th {
-      background: #1a1a30;
-      color: #f0a500;
-      padding: 7px 10px;
-      text-align: left;
-      position: sticky;
-      top: 0;
-      z-index: 2;
-      white-space: nowrap;
-      border-bottom: 2px solid #2a2a50;
-    }
-    th.sortable { cursor: pointer; user-select: none; }
-    th.sortable:hover { background: #22224a; color: #ffc030; }
-    td { padding: 6px 10px; vertical-align: top; border-bottom: 1px solid #191928; }
-    tr.task-row:hover td { background: #161624; }
-    tr.task-row { border-bottom: 2px solid #28284a; }
 
-    /* cell classes */
-    .c-traveler  { font-weight: 700; color: #f0a500; white-space: nowrap; }
-    .c-items     { color: #ccc; line-height: 1.7; }
-    .c-inv       { max-width: 150px; line-height: 1.7; }
-    .c-stalls    { max-width: 260px; line-height: 1.7; }
-    .c-craft     { line-height: 1.7; }
-    .c-num       { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-    .qty         { color: #7ec8e3; font-weight: 700; }
-    .sub         { color: #3a3a55; font-size: .68rem; }
-    .inv-ok      { color: #4caf50; font-size: .72rem; }
-    .inv-part    { color: #e0a030; font-size: .72rem; }
-    .craft-ok    { color: #4caf50; font-weight: 600; }
-    .craft-no    { color: #383850; font-size: .72rem; }
-    .stall-name  { color: #c97bff; font-size: .72rem; }
-    .na          { color: #333; font-style: italic; font-size: .7rem; }
-    .dim         { color: #383850; font-size: .72rem; }
-    .profit-pos  { color: #4caf50; font-weight: 700; }
-    .profit-neg  { color: #e05050; font-weight: 700; }
-    .hex         { color: #f0a500; }
+    #empty-msg {
+      padding: 48px 24px;
+      color: var(--text-dim);
+      font-size: .9rem;
+    }
 
-    #empty-msg { padding: 32px; color: #555; font-size: .9rem; }
+    /* ── Task card ── */
+    .task-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      width: var(--card-w);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .task-card:hover { border-color: var(--border2); }
+
+    .card-header {
+      background: var(--panel2);
+      border-bottom: 1px solid var(--border);
+      padding: 8px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .card-label   { font-size: .62rem; font-weight: 800; letter-spacing: .14em; color: var(--text-dim); text-transform: uppercase; }
+    .card-reward  { font-size: .8rem; font-weight: 800; color: var(--gold); white-space: nowrap; }
+
+    .card-traveler {
+      padding: 10px 12px 6px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .traveler-icon {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: var(--panel2);
+      border: 2px solid var(--border2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1rem;
+      color: var(--gold);
+      flex-shrink: 0;
+    }
+    .traveler-name {
+      font-weight: 800;
+      font-size: .9rem;
+      letter-spacing: .1em;
+      color: var(--gold);
+      text-transform: uppercase;
+    }
+    .traveler-desc {
+      font-size: .7rem;
+      color: var(--text-mid);
+      margin-top: 2px;
+      line-height: 1.35;
+    }
+
+    .card-divider { height: 1px; background: var(--border); margin: 0 12px; }
+
+    /* ── Item rows ── */
+    .card-items  { padding: 8px 12px; display: flex; flex-direction: column; gap: 10px; }
+    .item-block  { display: flex; flex-direction: column; gap: 3px; }
+    .item-row    { display: flex; align-items: center; gap: 8px; }
+    .item-qty    { font-size: .9rem; font-weight: 800; color: var(--teal); min-width: 28px; text-align: right; }
+    .item-name   { font-size: .82rem; color: var(--text); font-weight: 600; }
+    .item-type   { font-size: .62rem; color: var(--text-dim); background: var(--panel2); border: 1px solid var(--border); padding: 1px 5px; border-radius: 3px; text-transform: uppercase; letter-spacing: .04em; }
+
+    .item-meta   { display: flex; flex-direction: column; gap: 2px; padding-left: 36px; }
+    .meta-row    { display: flex; align-items: flex-start; gap: 6px; font-size: .68rem; line-height: 1.4; }
+    .meta-icon   { color: var(--text-dim); min-width: 12px; margin-top: 1px; }
+    .meta-text   { color: var(--text-mid); }
+    .val-ok      { color: var(--green); font-weight: 700; }
+    .val-part    { color: var(--gold); font-weight: 700; }
+    .val-no      { color: var(--text-dim); }
+    .val-stall   { color: var(--purple); }
+    .val-gold    { color: var(--gold); }
+    .loading     { color: var(--text-dim); font-style: italic; }
+
+    /* ── Card footer ── */
+    .card-footer {
+      margin-top: auto;
+      background: var(--panel2);
+      border-top: 1px solid var(--border);
+      padding: 8px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .footer-cost   { font-size: .72rem; color: var(--text-mid); }
+    .footer-profit { font-size: .82rem; font-weight: 800; }
+    .profit-pos    { color: var(--green); }
+    .profit-neg    { color: var(--red); }
+    .footer-craft  { font-size: .68rem; color: var(--text-mid); }
   </style>
 </head>
 <body>
-  <h1>⬡ Traveler Tasks <span>— BitCraft Assistant</span></h1>
 
-  <div id="search-row">
-    <input id="username-input" type="text" placeholder="Enter player name…" autocomplete="off">
-    <button id="btn-search">Search</button>
+  <!-- Top bar -->
+  <div id="topbar">
+    <div id="logo">⬡ Traveler Tasks <span>— BitCraft Assistant</span></div>
+    <div id="search-row">
+      <input id="username-input" type="text" placeholder="Enter player name…" autocomplete="off">
+      <button id="btn-search">Search</button>
+    </div>
   </div>
 
-  <div id="player-card">
+  <!-- Player info -->
+  <div id="player-strip">
     <div>
-      <div id="player-name"></div>
-      <div id="player-pos"></div>
-    </div>
-    <div id="range-group">
-      <label for="range-slider">Stall range:</label>
-      <input id="range-slider" type="range" min="100" max="3000" step="50" value="500">
-      <span id="range-val">500</span>
+      <div id="player-strip-name"></div>
+      <div id="player-strip-detail"></div>
     </div>
     <div id="expiry-cd" class="cd-ok"></div>
+    <div id="range-group">
+      <label for="range-slider">Stall range:</label>
+      <input id="range-slider" type="range" min="100" max="5000" step="100" value="1000">
+      <span id="range-val">1000</span> u
+    </div>
   </div>
 
+  <!-- Toolbar -->
   <div id="toolbar">
     <button id="btn-refresh">↺ Refresh</button>
-    <button id="btn-filter">☑ Completable</button>
+    <button id="btn-filter">☑ Completable only</button>
     <button id="btn-csv">↓ CSV</button>
+    <span id="task-count"></span>
     <span id="status"></span>
     <span id="refresh-cd"></span>
   </div>
 
-  <div id="tbl-wrap">
-    <div id="empty-msg"></div>
-    <table id="main-tbl" style="display:none">
-      <thead id="tbl-head"></thead>
-      <tbody id="tbl-body"></tbody>
-    </table>
-  </div>
+  <!-- Content -->
+  <div id="empty-msg"></div>
+  <div id="cards-wrap"></div>
 
   <script src="app.js"></script>
 </body>

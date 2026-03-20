@@ -1,7 +1,8 @@
 """
 GET /api/search?username=X
 
-Returns player ID, username, and position (N/E coords).
+Returns player ID, username, position (locationX/locationZ), regionId,
+current claimName and claimId via two-step BitJita lookup.
 """
 
 import json

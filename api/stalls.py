@@ -1,9 +1,8 @@
 """
-GET /api/stalls?n=X&e=Y&range=N
+GET /api/stalls?x=X&z=Z&range=N
 
 Fetches all stalls from BitJita, filters to those within `range` game units
-of the given N/E coordinates, and returns them sorted by distance with their
-item listings.
+of the given X/Z coordinates, and returns sell-side orders sorted by distance.
 """
 
 import json
@@ -17,6 +16,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from _lib import api_get, distance, cors_headers
 
 DEFAULT_RANGE = 500
+INFINITE_STOCK = 2_000_000_000  # remainingStock sentinel for unlimited
 
 
 class handler(BaseHTTPRequestHandler):
@@ -27,10 +27,10 @@ class handler(BaseHTTPRequestHandler):
         params = parse_qs(urlparse(self.path).query)
 
         try:
-            n      = float(params.get('n', [None])[0])
-            e      = float(params.get('e', [None])[0])
+            px = float(params.get('x', [None])[0])
+            pz = float(params.get('z', [None])[0])
         except (TypeError, ValueError):
-            self._send(400, {'error': 'n and e (player coordinates) are required'})
+            self._send(400, {'error': 'x and z (player coordinates) are required'})
             return
 
         try:
@@ -39,39 +39,66 @@ class handler(BaseHTTPRequestHandler):
             search_range = DEFAULT_RANGE
 
         try:
-            data  = api_get('/api/stalls')
-            stalls_raw = data.get('stalls') or data.get('data') or (data if isinstance(data, list) else [])
+            data       = api_get('/api/stalls')
+            stalls_raw = data.get('stalls') or (data if isinstance(data, list) else [])
 
             nearby = []
             for stall in stalls_raw:
-                # Normalise position — field names may vary
-                pos = stall.get('position') or stall.get('location') or stall.get('coords') or {}
-                sn  = pos.get('n') or pos.get('northing') or stall.get('n') or stall.get('northing')
-                se  = pos.get('e') or pos.get('easting')  or stall.get('e') or stall.get('easting')
-
-                if sn is None or se is None:
+                sx = stall.get('locationX')
+                sz = stall.get('locationZ')
+                if sx is None or sz is None:
                     continue
 
-                dist = distance(n, e, float(sn), float(se))
+                dist = distance(px, pz, float(sx), float(sz))
                 if dist > search_range:
                     continue
 
-                # Normalise items list
-                items_raw = stall.get('items') or stall.get('inventory') or stall.get('contents') or []
+                # Parse sell-side orders (offerItems / offerCargo)
                 items = []
-                for it in items_raw:
-                    item_id = str(it.get('itemId') or it.get('item_id') or it.get('id') or '')
-                    qty     = it.get('quantity') or it.get('qty') or 0
-                    price   = it.get('price') or it.get('unitPrice') or it.get('sell_price') or None
-                    if item_id:
-                        items.append({'id': item_id, 'qty': qty, 'price': price})
+                for order in stall.get('orders', []):
+                    stock    = order.get('remainingStock', 0)
+                    req      = order.get('requiredItems', [])
+                    req_c    = order.get('requiredCargo', [])
+
+                    # Price: first required item's quantity (usually Hexite Energy = coins)
+                    price      = req[0].get('quantity') if req else None
+                    price_item = req[0].get('itemName', '') if req else (req_c[0].get('cargoName', '') if req_c else '')
+
+                    for offer in order.get('offerItems', []):
+                        item_id = str(offer.get('itemId', ''))
+                        if not item_id:
+                            continue
+                        items.append({
+                            'id':         item_id,
+                            'name':       offer.get('itemName', ''),
+                            'qty':        offer.get('quantity', 1),
+                            'stock':      None if stock >= INFINITE_STOCK else stock,
+                            'price':      price,
+                            'price_item': price_item,
+                        })
+
+                    for offer in order.get('offerCargo', []):
+                        cargo_id = str(offer.get('cargoId', '') or offer.get('itemId', ''))
+                        if not cargo_id:
+                            continue
+                        items.append({
+                            'id':         cargo_id,
+                            'name':       offer.get('cargoName', '') or offer.get('itemName', ''),
+                            'qty':        offer.get('quantity', 1),
+                            'stock':      None if stock >= INFINITE_STOCK else stock,
+                            'price':      price,
+                            'price_item': price_item,
+                        })
+
+                if not items:
+                    continue
 
                 nearby.append({
-                    'name':     stall.get('name') or stall.get('stallName') or 'Stall',
-                    'owner':    stall.get('owner') or stall.get('ownerName') or stall.get('username') or '',
-                    'distance': round(dist),
-                    'position': {'n': sn, 'e': se},
-                    'items':    items,
+                    'name':      stall.get('nickname') or stall.get('ownerName', 'Stall'),
+                    'owner':     stall.get('ownerName', ''),
+                    'claimName': stall.get('claimName', ''),
+                    'distance':  round(dist),
+                    'items':     items,
                 })
 
             nearby.sort(key=lambda s: s['distance'])
