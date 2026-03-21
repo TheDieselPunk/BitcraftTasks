@@ -135,35 +135,6 @@ class handler(BaseHTTPRequestHandler):
                     k = f"{item['id']}|{item['type']}"
                     item['craft_info'] = seen.get(k, {'status': 'none', 'details': [], 'building': ''})
 
-            # Enrich market prices — one call per unique item (item + cargo)
-            if claim_id:
-                unique_items = {
-                    (item['id'], item['type'])
-                    for t in tasks
-                    for item in t['items']
-                }
-                price_map = {}
-                with ThreadPoolExecutor(max_workers=10) as pool:
-                    futures = {
-                        pool.submit(
-                            api_get,
-                            f'/api/market/{"cargo" if itype == "cargo" else "item"}/{iid}',
-                            {'claimId': claim_id}
-                        ): (iid, itype)
-                        for iid, itype in unique_items
-                    }
-                    for f in as_completed(futures):
-                        iid, itype = futures[f]
-                        try:
-                            d = f.result()
-                            price_map[iid] = d.get('stats', {}).get('lowestSell')
-                        except Exception:
-                            price_map[iid] = None
-
-                for t in tasks:
-                    for item in t['items']:
-                        item['market_price'] = price_map.get(item['id'])
-
             self._send(200, {
                 'tasks':    tasks,
                 'expiry':   tasks_data.get('expirationTimestamp'),

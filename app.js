@@ -246,11 +246,16 @@ function decorateTask(task, stallMap) {
     return { ...item, stall_matches: nearby };
   });
 
-  // Cost: pick the cheapest price across market + all stall matches (maximises profit)
+  // Cost: pick the cheapest price across nearest-market stalls + all nearby stalls
   let totalCost = 0, costKnown = true;
   for (const item of items) {
     const candidates = [];
-    if (item.market_price != null) candidates.push(item.market_price);
+    // Prices from nearest claim market (via S.marketMap)
+    const mkt = S.marketMap[item.id];
+    if (mkt?.listings?.length) {
+      mkt.listings.forEach(l => { const p = hexPrice(l.price_parts); if (p != null) candidates.push(p); });
+    }
+    // Prices from nearby stalls
     for (const m of (item.stall_matches || [])) {
       const sp = hexPrice(m.price_parts);
       if (sp != null) candidates.push(sp);
@@ -279,7 +284,7 @@ function isCompletable(task) {
   return task.items.every(item =>
     item.inv_have >= item.qty ||
     (item.stall_matches || []).length > 0 ||
-    item.market_price != null ||
+    S.marketMap[item.id]?.listings?.length > 0 ||
     item.craft_info?.status === 'yes'
   );
 }
@@ -318,14 +323,16 @@ function renderRow(task) {
     return lines.join('<br>');
   }).join('<br>');
 
-  // Market price column (nearest claim market via /api/market/item)
+  // Market price column — min hex coin price from stalls at nearest claim
   const marketHtml = task.items.map(item => {
-    if (item.market_price == null && item.market_price !== false)
-      return `<span class="dim">not listed</span>`;
-    if (item.market_price == null) return `<span class="na">—</span>`;
-    const unit  = item.market_price.toLocaleString();
-    const total = (item.market_price * item.qty).toLocaleString();
-    return `<span class="market-price">${HEX}${unit}</span> <span class="sub">(${HEX}${total})</span>`;
+    const mkt = S.marketMap[item.id];
+    if (!S.stallsLoaded) return '<span class="dim">⏳</span>';
+    if (!mkt?.listings?.length) return `<span class="dim">not listed</span>`;
+    const prices = mkt.listings.map(l => hexPrice(l.price_parts)).filter(p => p != null);
+    if (!prices.length) return `<span class="dim">barter only</span>`;
+    const best  = Math.min(...prices);
+    const total = (best * item.qty).toLocaleString();
+    return `<span class="market-price">${HEX}${best.toLocaleString()}</span> <span class="sub">(${HEX}${total})</span>`;
   }).join('<br>');
 
   // Craftable column
