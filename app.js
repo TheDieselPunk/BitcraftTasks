@@ -24,7 +24,7 @@ const S = {
   sortCol:       'profit',
   sortAsc:       false,
   filterOn:      false,
-  stallRange:    1000,
+  stallRange:    100,
   expiry:        null,
   tasksLoaded:   false,
   stallsLoaded:  false,
