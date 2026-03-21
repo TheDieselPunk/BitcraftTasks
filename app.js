@@ -135,8 +135,8 @@ async function load() {
 
 async function loadTasks() {
   try {
-    let url = `/api/tasks?player_id=${encodeURIComponent(S.player.id)}`;
-    if (S.player.nearestClaimId) url += `&nearest_claim_id=${encodeURIComponent(S.player.nearestClaimId)}`;
+    const claimId = S.marketClaimId || S.player.nearestClaimId || '864691128472806646';
+    let url = `/api/tasks?player_id=${encodeURIComponent(S.player.id)}&nearest_claim_id=${encodeURIComponent(claimId)}`;
     const data = await apiFetch(url);
     S.expiry      = data.expiry;
     S.tasks       = data.tasks || [];
