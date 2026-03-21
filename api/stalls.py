@@ -119,8 +119,8 @@ class handler(BaseHTTPRequestHandler):
             if region_id:
                 stalls_raw = [s for s in stalls_raw if str(s.get('regionId', '')) == str(region_id)]
 
-            nearby         = []   # stalls within configured range
-            all_with_dist  = []   # all stalls with distance, for nearest market
+            nearby         = []   # all stalls within range (for minimap)
+            all_with_dist  = []   # all stalls globally with distance, for nearest market
 
             for stall in stalls_raw:
                 sx = stall.get('locationX')
@@ -130,8 +130,6 @@ class handler(BaseHTTPRequestHandler):
 
                 dist  = distance(px, pz, float(sx), float(sz))
                 items = parse_sell_items(stall, dist)
-                if not items:
-                    continue
 
                 entry = {
                     'name':      stall.get('nickname') or stall.get('ownerName', 'Stall'),
@@ -140,10 +138,11 @@ class handler(BaseHTTPRequestHandler):
                     'distance':  round(dist),
                     'x':         float(sx),
                     'z':         float(sz),
-                    'items':     items,
+                    'items':     items,   # empty list for buy-only stalls
                 }
 
-                all_with_dist.append(entry)
+                if items:
+                    all_with_dist.append(entry)
 
                 if dist <= search_range:
                     nearby.append(entry)

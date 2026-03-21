@@ -24,7 +24,7 @@ const S = {
   sortCol:       'profit',
   sortAsc:       false,
   filterOn:      false,
-  stallRange:    100,
+  stallRange:    250,
   expiry:        null,
   tasksLoaded:   false,
   stallsLoaded:  false,
@@ -180,8 +180,8 @@ async function loadStalls() {
 // ── Stall map (nearby) ────────────────────────────────────────────────────────
 function buildStallMap() {
   const map = {};
-  for (const stall of S.stalls) {
-    for (const it of (stall.items || [])) {
+  for (const stall of S.stalls.filter(s => s.items?.length)) {
+    for (const it of stall.items) {
       if (!map[it.id]) map[it.id] = [];
       map[it.id].push({
         owner:       stall.owner,
