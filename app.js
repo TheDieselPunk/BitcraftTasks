@@ -287,14 +287,11 @@ function renderRow(task) {
     if (!S.stallsLoaded) return '<span class="dim">⏳</span>';
     const matches = item.stall_matches || [];
     if (!matches.length) return `<span class="na">—</span>`;
-    const shown = matches.slice(0, 2);
-    const extra = matches.length - 2;
-    const lines = shown.map(m => {
+    const lines = matches.map(m => {
       const ph      = priceHtml(m.price_parts);
       const distStr = `<span class="sub">${m.distance.toLocaleString()}u</span>`;
       return `<span class="stall-name">${esc(m.owner)}</span>${ph ? ' · ' + ph : ''} ${distStr}`;
     });
-    if (extra > 0) lines.push(`<span class="sub">+${extra} more</span>`);
     return lines.join('<br>');
   }).join('<br>');
 
