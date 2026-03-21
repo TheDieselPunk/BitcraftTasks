@@ -195,18 +195,23 @@ function buildStallMap() {
   return map;
 }
 
-// Returns the Hex Coin price from price_parts, or null if barter-only
+// Returns the per-unit Hex Coin price from price_parts, or null if barter-only
 function hexPrice(price_parts) {
   const coin = (price_parts || []).find(p => p.name === 'Hex Coin');
   return coin ? coin.qty : null;
 }
 
-// Renders price_parts as "250 Hex Coin" or "1 Parchment + 1 Ink"
+// Format a per-unit price value — show integer if whole, else 1 decimal
+function fmtQty(n) {
+  return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 1 });
+}
+
+// Renders price_parts as "⬡12/u" or "1.5 Parchment + 0.5 Ink" (all per-unit)
 function priceHtml(price_parts) {
   if (!price_parts?.length) return '';
   return price_parts.map(p => {
-    if (p.name === 'Hex Coin') return `<span class="sub">${HEX}${p.qty.toLocaleString()}</span>`;
-    return `<span class="sub">${p.qty.toLocaleString()} ${esc(p.name)}</span>`;
+    if (p.name === 'Hex Coin') return `<span class="sub">${HEX}${fmtQty(p.qty)}/u</span>`;
+    return `<span class="sub">${fmtQty(p.qty)} ${esc(p.name)}/u</span>`;
   }).join(' <span class="sub">+</span> ');
 }
 

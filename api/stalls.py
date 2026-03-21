@@ -31,32 +31,43 @@ def parse_sell_items(stall, dist):
         req_c = order.get('requiredCargo', [])
 
         # Build full price parts list — requiredCargo uses itemId/itemName (not cargoId/cargoName)
-        price_parts = [
+        raw_price_parts = [
             {'qty': r.get('quantity', 1), 'name': r.get('itemName', '') or r.get('cargoName', '')}
             for r in (req + req_c)
             if r.get('itemName') or r.get('cargoName')
         ]
 
         for offer in order.get('offerItems', []):
-            item_id = str(offer.get('itemId', ''))
+            item_id   = str(offer.get('itemId', ''))
+            offer_qty = max(offer.get('quantity', 1), 1)
             if not item_id:
                 continue
+            # Normalise price to per-unit (e.g. 60 hex for 5 items → 12 hex each)
+            price_parts = [
+                {'qty': round(p['qty'] / offer_qty, 4), 'name': p['name']}
+                for p in raw_price_parts
+            ]
             items.append({
                 'id':          item_id,
                 'name':        offer.get('itemName', ''),
-                'qty':         offer.get('quantity', 1),
+                'qty':         offer_qty,
                 'stock':       None if stock >= INFINITE_STOCK else stock,
                 'price_parts': price_parts,
             })
 
         for offer in order.get('offerCargo', []):
-            cargo_id = str(offer.get('itemId', '') or offer.get('cargoId', ''))
+            cargo_id  = str(offer.get('itemId', '') or offer.get('cargoId', ''))
+            offer_qty = max(offer.get('quantity', 1), 1)
             if not cargo_id:
                 continue
+            price_parts = [
+                {'qty': round(p['qty'] / offer_qty, 4), 'name': p['name']}
+                for p in raw_price_parts
+            ]
             items.append({
                 'id':          cargo_id,
                 'name':        offer.get('itemName', '') or offer.get('cargoName', ''),
-                'qty':         offer.get('quantity', 1),
+                'qty':         offer_qty,
                 'stock':       None if stock >= INFINITE_STOCK else stock,
                 'price_parts': price_parts,
             })
