@@ -246,13 +246,16 @@ function decorateTask(task, stallMap) {
     return { ...item, stall_matches: nearby };
   });
 
-  // Cost: use market_price if available, else cheapest nearby stall's Hex Coin price
+  // Cost: pick the cheapest price across market + all stall matches (maximises profit)
   let totalCost = 0, costKnown = true;
   for (const item of items) {
-    const mp    = item.market_price ?? null;
-    const sp    = hexPrice(item.stall_matches[0]?.price_parts);
-    const price = mp ?? sp;
-    if (price != null) totalCost += price * item.qty;
+    const candidates = [];
+    if (item.market_price != null) candidates.push(item.market_price);
+    for (const m of (item.stall_matches || [])) {
+      const sp = hexPrice(m.price_parts);
+      if (sp != null) candidates.push(sp);
+    }
+    if (candidates.length) totalCost += Math.min(...candidates) * item.qty;
     else costKnown = false;
   }
   const hasSource = items.some(i => i.stall_matches.length > 0 || i.market_price != null);
