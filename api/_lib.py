@@ -192,3 +192,44 @@ def get_craft_info(item_id, item_type, needed_qty, inv_map, items_map, cargo_map
 
 def distance(x1, z1, x2, z2):
     return math.sqrt((x2 - x1) ** 2 + (z2 - z1) ** 2)
+
+
+def get_market_price(item_id, item_type, px, pz):
+    """
+    Fetch all sell orders for an item, filter to the nearest claim by player
+    distance, and return the lowest priceThreshold there.
+    Returns None if no sell orders found nearby.
+    """
+    endpoint = f'/api/market/{"cargo" if item_type == "cargo" else "item"}/{item_id}'
+    try:
+        d = api_get(endpoint)
+    except Exception:
+        return None
+
+    orders = d.get('sellOrders', [])
+    if not orders:
+        return None
+
+    # Build map of claimEntityId → (distance, min_price)
+    claim_info = {}
+    for o in orders:
+        cid = o.get('claimEntityId')
+        cx  = o.get('claimLocationX')
+        cz  = o.get('claimLocationZ')
+        try:
+            price = int(o['priceThreshold'])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if not cid:
+            continue
+        dist = distance(px, pz, float(cx), float(cz)) if (cx is not None and cz is not None) else float('inf')
+        if cid not in claim_info or dist < claim_info[cid]['dist']:
+            claim_info[cid] = {'dist': dist, 'min_price': price}
+        elif dist == claim_info[cid]['dist']:
+            claim_info[cid]['min_price'] = min(claim_info[cid]['min_price'], price)
+
+    if not claim_info:
+        return None
+
+    nearest_cid = min(claim_info, key=lambda k: claim_info[k]['dist'])
+    return claim_info[nearest_cid]['min_price']
