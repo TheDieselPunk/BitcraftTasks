@@ -276,7 +276,7 @@ function renderRow(task) {
     const shown = matches.slice(0, 2);
     const extra = matches.length - 2;
     const lines = shown.map(m => {
-      const label    = m.claimName || m.name;
+      const label    = m.owner || m.name;
       const priceStr = m.price != null ? ` <span class="sub">${HEX}${m.price.toLocaleString()}</span>` : '';
       const distStr  = `<span class="sub">${m.distance.toLocaleString()}u</span>`;
       return `<span class="stall-name">${esc(label)}</span>${priceStr} ${distStr}`;
