@@ -93,6 +93,9 @@ async function doSearch() {
     if (data.regionId)          parts.push(`Region ${data.regionId}`);
     psDetail.textContent = parts.join(' · ');
 
+    psMarket.textContent = data.claimName
+      ? `⊙ Market: ${data.claimName}`
+      : '';
     playerStrip.classList.add('visible');
     toolbar.classList.add('visible');
     await load();
@@ -128,7 +131,9 @@ async function load() {
 
 async function loadTasks() {
   try {
-    const data = await apiFetch(`/api/tasks?player_id=${encodeURIComponent(S.player.id)}`);
+    let url = `/api/tasks?player_id=${encodeURIComponent(S.player.id)}`;
+    if (S.player.claimId) url += `&claim_id=${encodeURIComponent(S.player.claimId)}`;
+    const data = await apiFetch(url);
     S.expiry      = data.expiry;
     S.tasks       = data.tasks || [];
     S.tasksLoaded = true;
@@ -148,21 +153,8 @@ async function loadStalls() {
     const params = [`x=${x}`, `z=${z}`, `range=${S.stallRange}`];
     if (regionId) params.push(`regionId=${regionId}`);
     const data = await apiFetch(`/api/stalls?${params.join('&')}`);
-    S.stalls      = data.stalls || [];
+    S.stalls       = data.stalls || [];
     S.stallsLoaded = true;
-
-    // Nearest market
-    if (data.nearestMarket) {
-      S.marketMap   = data.nearestMarket.items || {};
-      S.marketClaim = data.nearestMarket;
-      const dist    = data.nearestMarket.distance;
-      const nm      = data.nearestMarket.claimName;
-      const sc      = data.nearestMarket.stallCount;
-      psMarket.textContent = `⊙ Nearest market: ${nm} (${dist.toLocaleString()} u · ${sc} stall${sc !== 1 ? 's' : ''})`;
-    } else {
-      psMarket.textContent = '';
-    }
-
     render();
   } catch (err) {
     S.stallsLoaded = true;
@@ -222,21 +214,20 @@ function render() {
 
 function decorateTask(task, stallMap) {
   const items = task.items.map(item => {
-    const nearby  = (stallMap[item.id] || []).filter(e => (e.stock == null || e.stock >= item.qty) && e.qty >= item.qty);
-    const market  = S.marketMap[item.id] || null;
-    return { ...item, stall_matches: nearby, market };
+    const nearby = (stallMap[item.id] || []).filter(e => (e.stock == null || e.stock >= item.qty) && e.qty >= item.qty);
+    return { ...item, stall_matches: nearby };
   });
 
-  // Cost: use market price if available, else cheapest nearby stall
+  // Cost: use market_price if available, else cheapest nearby stall
   let totalCost = 0, costKnown = true;
   for (const item of items) {
-    const mp = item.market?.minPrice;
-    const sp = item.stall_matches[0]?.price;
-    const price = mp ?? sp ?? null;
+    const mp    = item.market_price ?? null;
+    const sp    = item.stall_matches[0]?.price ?? null;
+    const price = mp ?? sp;
     if (price != null) totalCost += price * item.qty;
     else costKnown = false;
   }
-  const hasSource = items.some(i => i.stall_matches.length > 0 || i.market);
+  const hasSource = items.some(i => i.stall_matches.length > 0 || i.market_price != null);
   const cost   = costKnown && hasSource ? totalCost : null;
   const profit = cost != null ? task.reward - cost : null;
 
@@ -257,7 +248,7 @@ function isCompletable(task) {
   return task.items.every(item =>
     item.inv_have >= item.qty ||
     (item.stall_matches || []).length > 0 ||
-    item.market != null ||
+    item.market_price != null ||
     item.craft_info?.status === 'yes'
   );
 }
@@ -295,15 +286,15 @@ function renderRow(task) {
     return lines.join('<br>');
   }).join('<br>');
 
-  // Market price column (nearest claim)
+  // Market price column (nearest claim market via /api/market/item)
   const marketHtml = task.items.map(item => {
-    if (!S.stallsLoaded) return '<span class="dim">⏳</span>';
-    const m = item.market;
-    if (!m) return `<span class="na">—</span>`;
-    const price = m.minPrice != null
-      ? `<span class="market-price">${HEX}${m.minPrice.toLocaleString()}</span>`
-      : `<span class="dim">no price</span>`;
-    return price;
+    if (item.type === 'cargo') return `<span class="na">—</span>`;
+    if (item.market_price == null && item.market_price !== false)
+      return `<span class="dim">not listed</span>`;
+    if (item.market_price == null) return `<span class="na">—</span>`;
+    const unit  = item.market_price.toLocaleString();
+    const total = (item.market_price * item.qty).toLocaleString();
+    return `<span class="market-price">${HEX}${unit}</span> <span class="sub">(${HEX}${total})</span>`;
   }).join('<br>');
 
   // Craftable column

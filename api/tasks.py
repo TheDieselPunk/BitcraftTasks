@@ -1,10 +1,11 @@
 """
-GET /api/tasks?player_id=X
+GET /api/tasks?player_id=X&claim_id=Y
 
 Returns all incomplete traveler tasks for a player, enriched with:
 - Item names (from /api/items + /api/cargo catalogs)
 - Player inventory counts per item
 - Crafting status per item (yes/partial/no/none)
+- Market price at the given claim (lowestSell from /api/market/item/{id})
 """
 
 import json
@@ -68,6 +69,7 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         params    = parse_qs(urlparse(self.path).query)
         player_id = params.get('player_id', [''])[0].strip()
+        claim_id  = params.get('claim_id',  [''])[0].strip() or None
 
         if not player_id:
             self._send(400, {'error': 'player_id parameter is required'})
@@ -132,9 +134,39 @@ class handler(BaseHTTPRequestHandler):
                     k = f"{item['id']}|{item['type']}"
                     item['craft_info'] = seen.get(k, {'status': 'none', 'details': [], 'building': ''})
 
+            # Enrich market prices — one call per unique non-cargo item
+            if claim_id:
+                unique_item_ids = list({
+                    item['id']
+                    for t in tasks
+                    for item in t['items']
+                    if item['type'] != 'cargo'
+                })
+                price_map = {}
+                with ThreadPoolExecutor(max_workers=10) as pool:
+                    futures = {
+                        pool.submit(api_get, f'/api/market/item/{iid}', {'claimEntityId': claim_id}): iid
+                        for iid in unique_item_ids
+                    }
+                    for f in as_completed(futures):
+                        iid = futures[f]
+                        try:
+                            d = f.result()
+                            price_map[iid] = d.get('stats', {}).get('lowestSell')
+                        except Exception:
+                            price_map[iid] = None
+
+                for t in tasks:
+                    for item in t['items']:
+                        if item['type'] != 'cargo':
+                            item['market_price'] = price_map.get(item['id'])
+                        else:
+                            item['market_price'] = None
+
             self._send(200, {
-                'tasks':  tasks,
-                'expiry': tasks_data.get('expirationTimestamp'),
+                'tasks':    tasks,
+                'expiry':   tasks_data.get('expirationTimestamp'),
+                'claimId':  claim_id,
             })
 
         except Exception as e:
