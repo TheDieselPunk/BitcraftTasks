@@ -93,7 +93,7 @@ async function doSearch() {
 
     psName.textContent = data.username;
     const parts = [];
-    if (data.locationX != null) parts.push(`X ${Math.round(data.locationX / 3)}, Z ${Math.round(data.locationZ / 3)}`);
+    if (data.locationX != null) parts.push(`N ${Math.round(data.locationZ / 3)}, E ${Math.round(data.locationX / 3)}`);
     if (data.regionId)          parts.push(`Region ${data.regionId}`);
     psDetail.textContent = parts.join(' · ');
 
@@ -158,7 +158,16 @@ async function loadStalls() {
     if (regionId) params.push(`regionId=${regionId}`);
     const data = await apiFetch(`/api/stalls?${params.join('&')}`);
     S.stalls       = data.stalls || [];
+    S.marketMap    = data.nearestMarket?.items  || {};
+    S.marketClaim  = data.nearestMarket || null;
     S.stallsLoaded = true;
+
+    // Update nearest market display
+    const nm = data.nearestMarket;
+    psMarket.textContent = nm
+      ? `⊙ Nearest Market: ${nm.claimName} (${nm.distance}h, ${nm.stallCount} stall${nm.stallCount !== 1 ? 's' : ''})`
+      : '';
+
     render();
   } catch (err) {
     S.stallsLoaded = true;
