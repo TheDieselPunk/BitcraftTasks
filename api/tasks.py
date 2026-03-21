@@ -68,8 +68,9 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         params    = parse_qs(urlparse(self.path).query)
-        player_id = params.get('player_id', [''])[0].strip()
-        claim_id  = params.get('claim_id',  [''])[0].strip() or None
+        player_id = params.get('player_id',       [''])[0].strip()
+        claim_id  = params.get('nearest_claim_id',[''])[0].strip() or \
+                    params.get('claim_id',         [''])[0].strip() or None
 
         if not player_id:
             self._send(400, {'error': 'player_id parameter is required'})

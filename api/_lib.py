@@ -36,7 +36,8 @@ def cors_headers():
 def get_player(username):
     """
     Two-step lookup: search by username → full profile for position.
-    Returns {id, username, locationX, locationZ, regionId, claimName, claimId} or None.
+    Returns {id, username, locationX, locationZ, regionId, claimName, claimId,
+             nearestClaimName, nearestClaimId} or None.
     """
     data    = api_get('/api/players', {'q': username, 'limit': 5})
     players = data.get('players', [])
@@ -47,20 +48,58 @@ def get_player(username):
         return None
 
     player_id = str(match['entityId'])
+    profile   = api_get(f'/api/players/{player_id}')
+    p         = profile.get('player', {})
 
-    profile = api_get(f'/api/players/{player_id}')
-    p       = profile.get('player', {})
-    loc     = p.get('location') or {}
+    x         = p.get('locationX')
+    z         = p.get('locationZ')
+    region_id = p.get('regionId')
+
+    # Find the nearest claim in the region for market lookups
+    nearest = get_nearest_claim(x, z, region_id) if x is not None else None
 
     return {
-        'id':        player_id,
-        'username':  p.get('username', username),
-        'locationX': p.get('locationX'),
-        'locationZ': p.get('locationZ'),
-        'regionId':  p.get('regionId'),
-        'claimName': loc.get('name'),
-        'claimId':   str(loc['entityId']) if loc.get('entityId') else None,
+        'id':              player_id,
+        'username':        p.get('username', username),
+        'locationX':       x,
+        'locationZ':       z,
+        'regionId':        region_id,
+        'nearestClaimName': nearest['name']     if nearest else None,
+        'nearestClaimId':   nearest['entityId'] if nearest else None,
+        'nearestClaimDist': nearest['distance'] if nearest else None,
     }
+
+
+def get_nearest_claim(x, z, region_id):
+    """
+    Fetch all claims in the region and return the one closest to (x, z).
+    Returns {entityId, name, locationX, locationZ, distance} or None.
+    """
+    try:
+        params = {'regionId': region_id} if region_id else {}
+        data   = api_get('/api/claims', params)
+        claims = data.get('claims', data if isinstance(data, list) else [])
+        best, best_dist = None, float('inf')
+        for c in claims:
+            cx = c.get('locationX')
+            cz = c.get('locationZ')
+            if cx is None or cz is None:
+                continue
+            d = distance(x, z, cx, cz)
+            if d < best_dist:
+                best_dist = d
+                best = c
+        if best:
+            return {
+                'entityId': str(best['entityId']),
+                'name':     best.get('name', ''),
+                'locationX': best.get('locationX'),
+                'locationZ': best.get('locationZ'),
+                'distance': round(best_dist),
+            }
+    except Exception:
+        pass
+    return None
 
 
 def build_inv_map(inv_data):

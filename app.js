@@ -8,7 +8,7 @@ const COLS = [
   { label: 'Items',            sort: null        },
   { label: 'My Inventory',     sort: null        },
   { label: 'Nearby Stalls',    sort: null        },
-  { label: 'Market Price',     sort: null        },
+  { label: 'Claim Market',     sort: null        },
   { label: 'Craftable',        sort: null        },
   { label: `Reward ${HEX}`,   sort: 'reward'    },
   { label: `Cost ${HEX}`,     sort: 'cost'      },
@@ -89,12 +89,11 @@ async function doSearch() {
     psName.textContent = data.username;
     const parts = [];
     if (data.locationX != null) parts.push(`X ${Math.round(data.locationX)}, Z ${Math.round(data.locationZ)}`);
-    if (data.claimName)         parts.push(data.claimName);
     if (data.regionId)          parts.push(`Region ${data.regionId}`);
     psDetail.textContent = parts.join(' · ');
 
-    psMarket.textContent = data.claimName
-      ? `⊙ Market: ${data.claimName}`
+    psMarket.textContent = data.nearestClaimName
+      ? `⊙ Nearest Market: ${data.nearestClaimName}${data.nearestClaimDist != null ? ` (${Math.round(data.nearestClaimDist)} units)` : ''}`
       : '';
     playerStrip.classList.add('visible');
     toolbar.classList.add('visible');
@@ -132,7 +131,7 @@ async function load() {
 async function loadTasks() {
   try {
     let url = `/api/tasks?player_id=${encodeURIComponent(S.player.id)}`;
-    if (S.player.claimId) url += `&claim_id=${encodeURIComponent(S.player.claimId)}`;
+    if (S.player.nearestClaimId) url += `&nearest_claim_id=${encodeURIComponent(S.player.nearestClaimId)}`;
     const data = await apiFetch(url);
     S.expiry      = data.expiry;
     S.tasks       = data.tasks || [];
