@@ -59,6 +59,10 @@ const emptyMsg      = $('empty-msg');
 // ── Init ──────────────────────────────────────────────────────────────────────
 buildHeader();
 
+// Restore saved player name
+const _savedName = localStorage.getItem('bcTasks_username');
+if (_savedName) usernameInput.value = _savedName;
+
 usernameInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 btnSearch.addEventListener('click', doSearch);
 btnRefresh.addEventListener('click', () => load());
@@ -70,7 +74,7 @@ btnFilter.addEventListener('click', () => {
 btnCsv.addEventListener('click', downloadCsv);
 rangeSlider.addEventListener('input', () => {
   S.stallRange = +rangeSlider.value;
-  rangeVal.textContent = S.stallRange;
+  rangeVal.textContent = `${S.stallRange}h`;
   if (S.player?.locationX != null) loadStalls();
 });
 
@@ -85,15 +89,16 @@ async function doSearch() {
   try {
     const data = await apiFetch(`/api/search?username=${encodeURIComponent(username)}`);
     S.player = data;
+    localStorage.setItem('bcTasks_username', username);
 
     psName.textContent = data.username;
     const parts = [];
-    if (data.locationX != null) parts.push(`X ${Math.round(data.locationX)}, Z ${Math.round(data.locationZ)}`);
+    if (data.locationX != null) parts.push(`X ${Math.round(data.locationX / 3)}, Z ${Math.round(data.locationZ / 3)}`);
     if (data.regionId)          parts.push(`Region ${data.regionId}`);
     psDetail.textContent = parts.join(' · ');
 
     psMarket.textContent = data.nearestClaimName
-      ? `⊙ Nearest Market: ${data.nearestClaimName}${data.nearestClaimDist != null ? ` (${Math.round(data.nearestClaimDist)} units)` : ''}`
+      ? `⊙ Nearest Market: ${data.nearestClaimName}${data.nearestClaimDist != null ? ` (${Math.round(data.nearestClaimDist)}h)` : ''}`
       : '';
     playerStrip.classList.add('visible');
     toolbar.classList.add('visible');
@@ -288,9 +293,14 @@ function renderRow(task) {
     const matches = item.stall_matches || [];
     if (!matches.length) return `<span class="na">—</span>`;
     const lines = matches.map(m => {
-      const ph      = priceHtml(m.price_parts);
-      const distStr = `<span class="sub">${m.distance.toLocaleString()}u</span>`;
-      return `<span class="stall-name">${esc(m.owner)}</span>${ph ? ' · ' + ph : ''} ${distStr}`;
+      const ph        = priceHtml(m.price_parts);
+      const distStr   = `<span class="sub">${m.distance.toLocaleString()}h</span>`;
+      const coinPrice = hexPrice(m.price_parts);
+      const profit    = coinPrice != null ? task.reward - coinPrice * item.qty : null;
+      const profitStr = profit != null
+        ? ` <span class="${profit >= 0 ? 'profit-pos' : 'profit-neg'}">(${HEX}${profit.toLocaleString()})</span>`
+        : '';
+      return `<span class="stall-name">${esc(m.owner)}</span>${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
     });
     return lines.join('<br>');
   }).join('<br>');
