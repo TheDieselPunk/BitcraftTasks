@@ -201,17 +201,13 @@ function hexPrice(price_parts) {
   return coin ? coin.qty : null;
 }
 
-// Format a per-unit price value — show integer if whole, else 1 decimal
-function fmtQty(n) {
-  return Number.isInteger(n) ? n.toLocaleString() : n.toLocaleString(undefined, { maximumFractionDigits: 1 });
-}
-
-// Renders price_parts as "⬡12/u" or "1.5 Parchment + 0.5 Ink" (all per-unit)
+// Renders price_parts as "⬡12/u" or "3 Parchment/u" (all per-unit, integers)
 function priceHtml(price_parts) {
   if (!price_parts?.length) return '';
   return price_parts.map(p => {
-    if (p.name === 'Hex Coin') return `<span class="sub">${HEX}${fmtQty(p.qty)}/u</span>`;
-    return `<span class="sub">${fmtQty(p.qty)} ${esc(p.name)}/u</span>`;
+    const q = Math.round(p.qty).toLocaleString();
+    if (p.name === 'Hex Coin') return `<span class="sub">${HEX}${q}/u</span>`;
+    return `<span class="sub">${q} ${esc(p.name)}/u</span>`;
   }).join(' <span class="sub">+</span> ');
 }
 

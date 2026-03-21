@@ -44,7 +44,7 @@ def parse_sell_items(stall, dist):
                 continue
             # Normalise price to per-unit (e.g. 60 hex for 5 items → 12 hex each)
             price_parts = [
-                {'qty': round(p['qty'] / offer_qty, 4), 'name': p['name']}
+                {'qty': round(p['qty'] / offer_qty), 'name': p['name']}
                 for p in raw_price_parts
             ]
             items.append({
@@ -61,7 +61,7 @@ def parse_sell_items(stall, dist):
             if not cargo_id:
                 continue
             price_parts = [
-                {'qty': round(p['qty'] / offer_qty, 4), 'name': p['name']}
+                {'qty': round(p['qty'] / offer_qty), 'name': p['name']}
                 for p in raw_price_parts
             ]
             items.append({
