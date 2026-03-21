@@ -320,7 +320,6 @@ function renderRow(task) {
 
   // Market price column (nearest claim market via /api/market/item)
   const marketHtml = task.items.map(item => {
-    if (item.type === 'cargo') return `<span class="na">—</span>`;
     if (item.market_price == null && item.market_price !== false)
       return `<span class="dim">not listed</span>`;
     if (item.market_price == null) return `<span class="na">—</span>`;

@@ -135,22 +135,25 @@ class handler(BaseHTTPRequestHandler):
                     k = f"{item['id']}|{item['type']}"
                     item['craft_info'] = seen.get(k, {'status': 'none', 'details': [], 'building': ''})
 
-            # Enrich market prices — one call per unique non-cargo item
+            # Enrich market prices — one call per unique item (item + cargo)
             if claim_id:
-                unique_item_ids = list({
-                    item['id']
+                unique_items = {
+                    (item['id'], item['type'])
                     for t in tasks
                     for item in t['items']
-                    if item['type'] != 'cargo'
-                })
+                }
                 price_map = {}
                 with ThreadPoolExecutor(max_workers=10) as pool:
                     futures = {
-                        pool.submit(api_get, f'/api/market/item/{iid}', {'claimId': claim_id}): iid
-                        for iid in unique_item_ids
+                        pool.submit(
+                            api_get,
+                            f'/api/market/{"cargo" if itype == "cargo" else "item"}/{iid}',
+                            {'claimId': claim_id}
+                        ): (iid, itype)
+                        for iid, itype in unique_items
                     }
                     for f in as_completed(futures):
-                        iid = futures[f]
+                        iid, itype = futures[f]
                         try:
                             d = f.result()
                             price_map[iid] = d.get('stats', {}).get('lowestSell')
@@ -159,10 +162,7 @@ class handler(BaseHTTPRequestHandler):
 
                 for t in tasks:
                     for item in t['items']:
-                        if item['type'] != 'cargo':
-                            item['market_price'] = price_map.get(item['id'])
-                        else:
-                            item['market_price'] = None
+                        item['market_price'] = price_map.get(item['id'])
 
             self._send(200, {
                 'tasks':    tasks,
