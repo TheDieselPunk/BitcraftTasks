@@ -75,6 +75,7 @@ btnCsv.addEventListener('click', downloadCsv);
 rangeSlider.addEventListener('input', () => {
   S.stallRange = +rangeSlider.value;
   rangeVal.textContent = `${S.stallRange}h`;
+  drawMiniMap();
   if (S.player?.locationX != null) loadStalls();
 });
 
@@ -161,6 +162,7 @@ async function loadStalls() {
     S.marketMap    = data.nearestMarket?.items  || {};
     S.marketClaim  = data.nearestMarket || null;
     S.stallsLoaded = true;
+    drawMiniMap();
 
     // Update nearest market display
     const nm = data.nearestMarket;
@@ -425,6 +427,158 @@ function scheduleRefresh() {
   tick();
   S.refreshCdTimer = setInterval(tick, 1000);
 }
+
+// ── Mini-map ──────────────────────────────────────────────────────────────────
+const mapSection = $('map-section');
+const mapCanvas  = $('map-canvas');
+const mapTip     = $('map-tip');
+
+function drawMiniMap() {
+  if (!mapCanvas || !S.player?.locationX || !S.stallsLoaded) return;
+  mapSection.classList.add('visible');
+
+  const ctx  = mapCanvas.getContext('2d');
+  const W    = mapCanvas.width, H = mapCanvas.height;
+  const cx   = W / 2, cy = H / 2;
+  const R    = Math.min(W, H) / 2 - 2;
+  const range = S.stallRange;
+  const scale = R / range;
+  const px   = S.player.locationX, pz = S.player.locationZ;
+
+  ctx.clearRect(0, 0, W, H);
+
+  // ── Background disc ──
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.fillStyle = '#07070f';
+  ctx.fill();
+
+  // ── Clip all inner drawing to the disc ──
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.clip();
+
+  // Range rings
+  ctx.strokeStyle = '#14142a';
+  ctx.lineWidth = 1;
+  [0.25, 0.5, 0.75].forEach(f => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, R * f, 0, Math.PI * 2);
+    ctx.stroke();
+  });
+
+  // Cardinal crosshairs
+  ctx.strokeStyle = '#14142a';
+  ctx.setLineDash([2, 5]);
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R);
+  ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // ── Stall icons ──
+  for (const stall of S.stalls) {
+    if (stall.x == null) continue;
+    const sx = cx + (stall.x - px) * scale;
+    const sy = cy - (stall.z - pz) * scale; // flip Z: north = up
+    drawStallIcon(ctx, sx, sy);
+  }
+
+  ctx.restore();
+
+  // ── Range border ──
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.strokeStyle = '#f0a50055';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 5]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // ── Player dot ──
+  ctx.beginPath();
+  ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+  ctx.fillStyle = '#f0a500';
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // ── Compass N ──
+  ctx.fillStyle = '#ffffff30';
+  ctx.font = 'bold 10px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('N', cx, cy - R + 14);
+  ctx.fillText('S', cx, cy + R - 5);
+  ctx.fillText('E', cx + R - 5, cy + 4);
+  ctx.fillText('W', cx - R + 5, cy + 4);
+
+  // ── Stall count ──
+  ctx.fillStyle = '#c97bff88';
+  ctx.font = '10px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(`${S.stalls.length} stall${S.stalls.length !== 1 ? 's' : ''}`, cx - R + 8, cy + R - 6);
+}
+
+function drawStallIcon(ctx, x, y) {
+  const s = 5;
+  ctx.fillStyle = '#c97bff';
+  ctx.strokeStyle = '#e8b0ff99';
+  ctx.lineWidth = 0.8;
+  // Roof
+  ctx.beginPath();
+  ctx.moveTo(x, y - s * 1.6);
+  ctx.lineTo(x - s, y - s * 0.3);
+  ctx.lineTo(x + s, y - s * 0.3);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  // Body
+  ctx.fillRect(x - s * 0.65, y - s * 0.3, s * 1.3, s * 1.3);
+  ctx.strokeRect(x - s * 0.65, y - s * 0.3, s * 1.3, s * 1.3);
+}
+
+function initMapHover() {
+  if (!mapCanvas || !mapTip) return;
+
+  mapCanvas.addEventListener('mousemove', e => {
+    if (!S.player?.locationX || !S.stallsLoaded) return;
+    const rect  = mapCanvas.getBoundingClientRect();
+    const mx    = e.clientX - rect.left;
+    const my    = e.clientY - rect.top;
+    const W     = mapCanvas.width, H = mapCanvas.height;
+    const cx    = W / 2, cy = H / 2;
+    const R     = Math.min(W, H) / 2 - 2;
+    const scale = R / S.stallRange;
+    const px    = S.player.locationX, pz = S.player.locationZ;
+
+    let found = null;
+    for (const stall of S.stalls) {
+      if (stall.x == null) continue;
+      const sx = cx + (stall.x - px) * scale;
+      const sy = cy - (stall.z - pz) * scale;
+      if (Math.hypot(mx - sx, my - sy) < 10) { found = stall; break; }
+    }
+
+    if (found) {
+      mapTip.style.display = 'block';
+      mapTip.style.left = (e.clientX + 14) + 'px';
+      mapTip.style.top  = (e.clientY + 14) + 'px';
+      const itemList = (found.items || []).slice(0, 4).map(i => esc(i.name)).join('<br>');
+      mapTip.innerHTML =
+        `<strong style="color:#c97bff">${esc(found.owner)}</strong> · <span class="sub">${found.distance}h</span><br>` +
+        `<span style="color:#888">${esc(found.claimName)}</span>` +
+        (itemList ? `<br><span style="color:#aaa">${itemList}</span>` : '');
+    } else {
+      mapTip.style.display = 'none';
+    }
+  });
+
+  mapCanvas.addEventListener('mouseleave', () => { mapTip.style.display = 'none'; });
+}
+
+initMapHover();
 
 // ── CSV export ────────────────────────────────────────────────────────────────
 function downloadCsv() {

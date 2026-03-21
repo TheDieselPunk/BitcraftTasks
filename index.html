@@ -150,6 +150,47 @@
     .type-tag    { color: #444466; font-size: .62rem; background: #0d0d1e; border: 1px solid #1a1a3a; padding: 0 4px; border-radius: 3px; }
 
     #empty-msg { padding: 40px 20px; color: #333355; font-size: .9rem; }
+
+    /* ── Mini-map ── */
+    #map-section {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      padding: 12px 20px 0;
+      gap: 6px;
+    }
+    #map-section.visible { display: flex; }
+    #map-wrap {
+      position: relative;
+      width: 320px;
+      height: 320px;
+    }
+    #map-canvas {
+      border-radius: 50%;
+      border: 1px solid #2a2a4a;
+      cursor: crosshair;
+      display: block;
+    }
+    #map-tip {
+      position: fixed;
+      background: #0d0d1e;
+      border: 1px solid #3a3a5a;
+      color: #ccc;
+      font-size: .72rem;
+      padding: 5px 10px;
+      border-radius: 5px;
+      pointer-events: none;
+      display: none;
+      white-space: nowrap;
+      z-index: 100;
+      font-family: inherit;
+      line-height: 1.5;
+    }
+    #map-label {
+      font-size: .7rem;
+      color: #444466;
+      letter-spacing: .06em;
+    }
   </style>
 </head>
 <body>
@@ -174,6 +215,14 @@
       <input id="range-slider" type="range" min="100" max="500" step="10" value="100">
       <span id="range-val">100h</span> <span class="sub" title="Distance unit used throughout this page">hexes</span>
     </div>
+  </div>
+
+  <div id="map-section">
+    <div id="map-wrap">
+      <canvas id="map-canvas" width="320" height="320"></canvas>
+      <div id="map-tip"></div>
+    </div>
+    <div id="map-label">TRADER STANDS WITHIN RANGE</div>
   </div>
 
   <div id="toolbar">

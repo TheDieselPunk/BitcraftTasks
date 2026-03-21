@@ -138,6 +138,8 @@ class handler(BaseHTTPRequestHandler):
                     'owner':     stall.get('ownerName', ''),
                     'claimName': stall.get('claimName', ''),
                     'distance':  round(dist),
+                    'x':         float(sx),
+                    'z':         float(sz),
                     'items':     items,
                 }
 
