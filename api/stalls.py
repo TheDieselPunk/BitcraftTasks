@@ -13,6 +13,7 @@ import os
 import math
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(__file__))
 from _lib import api_get, distance, cors_headers
@@ -82,8 +83,23 @@ class handler(BaseHTTPRequestHandler):
         region_id = params.get('regionId', [None])[0]
 
         try:
-            data       = api_get('/api/stalls')
-            stalls_raw = data.get('stalls') or (data if isinstance(data, list) else [])
+            PAGE_SIZE = 100
+            first     = api_get('/api/stalls', {'limit': PAGE_SIZE, 'page': 1})
+            stalls_raw = list(first.get('stalls', []))
+            total_pages = first.get('totalPages', 1)
+
+            # Fetch remaining pages in parallel
+            if total_pages > 1:
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    futures = {
+                        pool.submit(api_get, '/api/stalls', {'limit': PAGE_SIZE, 'page': p}): p
+                        for p in range(2, total_pages + 1)
+                    }
+                    for f in as_completed(futures):
+                        try:
+                            stalls_raw.extend(f.result().get('stalls', []))
+                        except Exception:
+                            pass
 
             # Optionally pre-filter by region to reduce work
             if region_id:
