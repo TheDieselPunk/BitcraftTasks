@@ -155,7 +155,7 @@ async function loadTasks() {
 async function loadStalls() {
   const { locationX: x, locationZ: z, regionId } = S.player;
   try {
-    const params = [`x=${x}`, `z=${z}`, `range=${S.stallRange}`];
+    const params = [`x=${x}`, `z=${z}`, `range=${S.stallRange * 3}`]; // slider is display units; API uses raw (×3)
     if (regionId) params.push(`regionId=${regionId}`);
     const data = await apiFetch(`/api/stalls?${params.join('&')}`);
     S.stalls       = data.stalls || [];
@@ -167,7 +167,7 @@ async function loadStalls() {
     // Update nearest market display
     const nm = data.nearestMarket;
     psMarket.textContent = nm
-      ? `⊙ Nearest Market: ${nm.claimName} (${nm.distance}h, ${nm.stallCount} stall${nm.stallCount !== 1 ? 's' : ''})`
+      ? `⊙ Nearest Market: ${nm.claimName} (${Math.round(nm.distance / 3)}h, ${nm.stallCount} stall${nm.stallCount !== 1 ? 's' : ''})`
       : '';
 
     render();
@@ -310,7 +310,7 @@ function renderRow(task) {
     if (!matches.length) return `<span class="na">—</span>`;
     const lines = matches.map(m => {
       const ph        = priceHtml(m.price_parts);
-      const distStr   = `<span class="sub">${m.distance.toLocaleString()}h</span>`;
+      const distStr   = `<span class="sub">${Math.round(m.distance / 3).toLocaleString()}h</span>`;
       const coinPrice = hexPrice(m.price_parts);
       const profit    = coinPrice != null ? task.reward - coinPrice * item.qty : null;
       const profitStr = profit != null
@@ -440,9 +440,9 @@ function drawMiniMap() {
   const ctx  = mapCanvas.getContext('2d');
   const W    = mapCanvas.width, H = mapCanvas.height;
   const cx   = W / 2, cy = H / 2;
-  const R    = Math.min(W, H) / 2 - 2;
-  const range = S.stallRange;
-  const scale = R / range;
+  const R        = Math.min(W, H) / 2 - 2;
+  const rawRange = S.stallRange * 3; // slider is display units; coordinates are raw (×3)
+  const scale    = R / rawRange;
   const px   = S.player.locationX, pz = S.player.locationZ;
 
   ctx.clearRect(0, 0, W, H);
@@ -550,7 +550,7 @@ function initMapHover() {
     const W     = mapCanvas.width, H = mapCanvas.height;
     const cx    = W / 2, cy = H / 2;
     const R     = Math.min(W, H) / 2 - 2;
-    const scale = R / S.stallRange;
+    const scale = R / (S.stallRange * 3);
     const px    = S.player.locationX, pz = S.player.locationZ;
 
     let found = null;
@@ -567,7 +567,7 @@ function initMapHover() {
       mapTip.style.top  = (e.clientY + 14) + 'px';
       const itemList = (found.items || []).slice(0, 4).map(i => esc(i.name)).join('<br>');
       mapTip.innerHTML =
-        `<strong style="color:#c97bff">${esc(found.owner)}</strong> · <span class="sub">${found.distance}h</span><br>` +
+        `<strong style="color:#c97bff">${esc(found.owner)}</strong> · <span class="sub">${Math.round(found.distance / 3)}h</span><br>` +
         `<span style="color:#888">${esc(found.claimName)}</span>` +
         (itemList ? `<br><span style="color:#aaa">${itemList}</span>` : '');
     } else {
