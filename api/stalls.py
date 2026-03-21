@@ -26,36 +26,39 @@ def parse_sell_items(stall, dist):
     """Extract sell-side orders from a stall into a flat item list."""
     items = []
     for order in stall.get('orders', []):
-        stock    = order.get('remainingStock', 0)
-        req      = order.get('requiredItems', [])
-        req_c    = order.get('requiredCargo', [])
-        price      = req[0].get('quantity')   if req   else None
-        price_item = req[0].get('itemName','') if req   else (req_c[0].get('cargoName','') if req_c else '')
+        stock = order.get('remainingStock', 0)
+        req   = order.get('requiredItems', [])
+        req_c = order.get('requiredCargo', [])
+
+        # Build full price parts list — requiredCargo uses itemId/itemName (not cargoId/cargoName)
+        price_parts = [
+            {'qty': r.get('quantity', 1), 'name': r.get('itemName', '') or r.get('cargoName', '')}
+            for r in (req + req_c)
+            if r.get('itemName') or r.get('cargoName')
+        ]
 
         for offer in order.get('offerItems', []):
             item_id = str(offer.get('itemId', ''))
             if not item_id:
                 continue
             items.append({
-                'id':         item_id,
-                'name':       offer.get('itemName', ''),
-                'qty':        offer.get('quantity', 1),
-                'stock':      None if stock >= INFINITE_STOCK else stock,
-                'price':      price,
-                'price_item': price_item,
+                'id':          item_id,
+                'name':        offer.get('itemName', ''),
+                'qty':         offer.get('quantity', 1),
+                'stock':       None if stock >= INFINITE_STOCK else stock,
+                'price_parts': price_parts,
             })
 
         for offer in order.get('offerCargo', []):
-            cargo_id = str(offer.get('cargoId', '') or offer.get('itemId', ''))
+            cargo_id = str(offer.get('itemId', '') or offer.get('cargoId', ''))
             if not cargo_id:
                 continue
             items.append({
-                'id':         cargo_id,
-                'name':       offer.get('cargoName', '') or offer.get('itemName', ''),
-                'qty':        offer.get('quantity', 1),
-                'stock':      None if stock >= INFINITE_STOCK else stock,
-                'price':      price,
-                'price_item': price_item,
+                'id':          cargo_id,
+                'name':        offer.get('itemName', '') or offer.get('cargoName', ''),
+                'qty':         offer.get('quantity', 1),
+                'stock':       None if stock >= INFINITE_STOCK else stock,
+                'price_parts': price_parts,
             })
 
     return items
@@ -147,15 +150,15 @@ class handler(BaseHTTPRequestHandler):
                     for it in cs['items']:
                         k = it['id']
                         if k not in price_map:
-                            price_map[k] = {'name': it['name'], 'minPrice': None, 'totalQty': 0}
-                        e = price_map[k]
-                        if it['price'] is not None:
-                            if e['minPrice'] is None or it['price'] < e['minPrice']:
-                                e['minPrice'] = it['price']
-                        if it['stock'] is not None:
-                            e['totalQty'] += it['stock']
-                        elif it['qty']:
-                            e['totalQty'] += it['qty']
+                            price_map[k] = {'name': it['name'], 'listings': []}
+                        # Find coin price (Hex Coin = itemId 1) for sorting; fall back to first part qty
+                        parts = it.get('price_parts', [])
+                        price_map[k]['listings'].append({
+                            'price_parts': parts,
+                            'qty':         it['qty'],
+                            'stock':       it['stock'],
+                            'owner':       cs['owner'],
+                        })
 
                 nearest_market = {
                     'claimName':  nearest_claim_name,

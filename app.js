@@ -168,18 +168,32 @@ function buildStallMap() {
     for (const it of (stall.items || [])) {
       if (!map[it.id]) map[it.id] = [];
       map[it.id].push({
-        name:      stall.name,
-        owner:     stall.owner,
-        claimName: stall.claimName,
-        distance:  stall.distance,
-        qty:       it.qty,
-        stock:     it.stock,
-        price:     it.price,
+        owner:       stall.owner,
+        claimName:   stall.claimName,
+        distance:    stall.distance,
+        qty:         it.qty,
+        stock:       it.stock,
+        price_parts: it.price_parts || [],
       });
     }
   }
   for (const k of Object.keys(map)) map[k].sort((a, b) => a.distance - b.distance);
   return map;
+}
+
+// Returns the Hex Coin price from price_parts, or null if barter-only
+function hexPrice(price_parts) {
+  const coin = (price_parts || []).find(p => p.name === 'Hex Coin');
+  return coin ? coin.qty : null;
+}
+
+// Renders price_parts as "250 Hex Coin" or "1 Parchment + 1 Ink"
+function priceHtml(price_parts) {
+  if (!price_parts?.length) return '';
+  return price_parts.map(p => {
+    if (p.name === 'Hex Coin') return `<span class="sub">${HEX}${p.qty.toLocaleString()}</span>`;
+    return `<span class="sub">${p.qty.toLocaleString()} ${esc(p.name)}</span>`;
+  }).join(' <span class="sub">+</span> ');
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -217,11 +231,11 @@ function decorateTask(task, stallMap) {
     return { ...item, stall_matches: nearby };
   });
 
-  // Cost: use market_price if available, else cheapest nearby stall
+  // Cost: use market_price if available, else cheapest nearby stall's Hex Coin price
   let totalCost = 0, costKnown = true;
   for (const item of items) {
     const mp    = item.market_price ?? null;
-    const sp    = item.stall_matches[0]?.price ?? null;
+    const sp    = hexPrice(item.stall_matches[0]?.price_parts);
     const price = mp ?? sp;
     if (price != null) totalCost += price * item.qty;
     else costKnown = false;
@@ -276,10 +290,9 @@ function renderRow(task) {
     const shown = matches.slice(0, 2);
     const extra = matches.length - 2;
     const lines = shown.map(m => {
-      const label    = m.owner || m.name;
-      const priceStr = m.price != null ? ` <span class="sub">${HEX}${m.price.toLocaleString()}</span>` : '';
-      const distStr  = `<span class="sub">${m.distance.toLocaleString()}u</span>`;
-      return `<span class="stall-name">${esc(label)}</span>${priceStr} ${distStr}`;
+      const ph      = priceHtml(m.price_parts);
+      const distStr = `<span class="sub">${m.distance.toLocaleString()}u</span>`;
+      return `<span class="stall-name">${esc(m.owner)}</span>${ph ? ' · ' + ph : ''} ${distStr}`;
     });
     if (extra > 0) lines.push(`<span class="sub">+${extra} more</span>`);
     return lines.join('<br>');
@@ -403,10 +416,11 @@ function downloadCsv() {
     const dt = decorateTask(task, stallMap);
     for (const item of dt.items) {
       const best = item.stall_matches?.[0];
+      const bestPrice = best ? (hexPrice(best.price_parts) ?? (best.price_parts||[]).map(p=>`${p.qty} ${p.name}`).join('+')) : '';
       rows.push([
         q(task.traveler), q(item.name), item.qty, item.type, item.inv_have,
-        q(best?.claimName || best?.name || ''), best?.price ?? '', best?.distance ?? '',
-        item.market?.minPrice ?? '',
+        q(best?.owner || ''), q(bestPrice), best?.distance ?? '',
+        item.market_price ?? '',
         item.craft_info?.status || '', task.reward, dt.cost ?? '', dt.profit ?? '',
       ].join(','));
     }
