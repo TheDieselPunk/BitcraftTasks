@@ -146,7 +146,7 @@ class handler(BaseHTTPRequestHandler):
                 price_map = {}
                 with ThreadPoolExecutor(max_workers=10) as pool:
                     futures = {
-                        pool.submit(api_get, f'/api/market/item/{iid}', {'claimEntityId': claim_id}): iid
+                        pool.submit(api_get, f'/api/market/item/{iid}', {'claimId': claim_id}): iid
                         for iid in unique_item_ids
                     }
                     for f in as_completed(futures):
