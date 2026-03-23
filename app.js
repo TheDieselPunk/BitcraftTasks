@@ -19,8 +19,8 @@ const S = {
   player:        null,
   tasks:         [],
   stalls:        [],
-  marketMap:     {},    // item_id → {name, minPrice, totalQty} from nearest market claim
-  marketClaim:   null,  // {claimName, distance, stallCount}
+  marketMap:     {},
+  marketClaim:   null,
   sortCol:       'profit',
   sortAsc:       false,
   filterOn:      false,
@@ -32,6 +32,7 @@ const S = {
   refreshTimer:  null,
   refreshCdTimer: null,
   refreshAt:     null,
+  watchedStalls: JSON.parse(localStorage.getItem('bcTasks_watched') || '[]'),
 };
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
@@ -45,6 +46,11 @@ const psMarket      = $('ps-market');
 const expiryCd      = $('expiry-cd');
 const rangeSlider   = $('range-slider');
 const rangeVal      = $('range-val');
+const watchRow      = $('watch-row');
+const watchInput    = $('watch-input');
+const btnWatchAdd   = $('btn-watch-add');
+const watchChips    = $('watch-chips');
+const ownersList    = $('stall-owners-list');
 const toolbar       = $('toolbar');
 const btnRefresh    = $('btn-refresh');
 const btnFilter     = $('btn-filter');
@@ -55,9 +61,11 @@ const tblHead       = $('tbl-head');
 const tblBody       = $('tbl-body');
 const mainTbl       = $('main-tbl');
 const emptyMsg      = $('empty-msg');
+const tipBox        = $('tip-box');
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 buildHeader();
+renderWatchChips();
 
 // Restore saved player name
 const _savedName = localStorage.getItem('bcTasks_username');
@@ -75,8 +83,53 @@ btnCsv.addEventListener('click', downloadCsv);
 rangeSlider.addEventListener('input', () => {
   S.stallRange = +rangeSlider.value;
   rangeVal.textContent = `${S.stallRange}h`;
-  drawMiniMap();
   if (S.player?.locationX != null) loadStalls();
+});
+
+// ── Watched stalls ─────────────────────────────────────────────────────────────
+function saveWatched() {
+  localStorage.setItem('bcTasks_watched', JSON.stringify(S.watchedStalls));
+}
+
+function addWatch(name) {
+  const n = name.trim();
+  if (!n || S.watchedStalls.includes(n)) return;
+  S.watchedStalls.push(n);
+  saveWatched();
+  renderWatchChips();
+  if (S.player?.locationX != null) loadStalls();
+}
+
+function removeWatch(name) {
+  S.watchedStalls = S.watchedStalls.filter(n => n !== name);
+  saveWatched();
+  renderWatchChips();
+  if (S.player?.locationX != null) loadStalls();
+}
+
+function renderWatchChips() {
+  watchChips.innerHTML = S.watchedStalls.map(n =>
+    `<span class="watch-chip">${esc(n)}<button onclick="removeWatch(${JSON.stringify(n)})" title="Remove">×</button></span>`
+  ).join('');
+}
+
+btnWatchAdd.addEventListener('click', () => { addWatch(watchInput.value); watchInput.value = ''; });
+watchInput.addEventListener('keydown', e => { if (e.key === 'Enter') { addWatch(watchInput.value); watchInput.value = ''; } });
+
+// ── Tooltip ────────────────────────────────────────────────────────────────────
+function showTip(e, html) {
+  tipBox.innerHTML = html;
+  tipBox.style.display = 'block';
+  moveTip(e);
+}
+function moveTip(e) {
+  tipBox.style.left = (e.clientX + 14) + 'px';
+  tipBox.style.top  = (e.clientY + 14) + 'px';
+}
+function hideTip() { tipBox.style.display = 'none'; }
+
+document.addEventListener('mousemove', e => {
+  if (tipBox.style.display !== 'none') moveTip(e);
 });
 
 // ── Search ────────────────────────────────────────────────────────────────────
@@ -102,6 +155,7 @@ async function doSearch() {
       ? `⊙ Nearest Market: ${data.nearestClaimName}${data.nearestClaimDist != null ? ` (${Math.round(data.nearestClaimDist)}h)` : ''}`
       : '';
     playerStrip.classList.add('visible');
+    watchRow.classList.add('visible');
     toolbar.classList.add('visible');
     await load();
   } catch (err) {
@@ -155,14 +209,19 @@ async function loadTasks() {
 async function loadStalls() {
   const { locationX: x, locationZ: z, regionId } = S.player;
   try {
-    const params = [`x=${x}`, `z=${z}`, `range=${S.stallRange * 3}`]; // slider is display units; API uses raw (×3)
+    const params = [`x=${x}`, `z=${z}`, `range=${S.stallRange * 3}`];
     if (regionId) params.push(`regionId=${regionId}`);
+    if (S.watchedStalls.length) params.push(`watch=${encodeURIComponent(S.watchedStalls.join(','))}`);
     const data = await apiFetch(`/api/stalls?${params.join('&')}`);
     S.stalls       = data.stalls || [];
     S.marketMap    = data.nearestMarket?.items  || {};
     S.marketClaim  = data.nearestMarket || null;
     S.stallsLoaded = true;
-    drawMiniMap();
+
+    // Populate autocomplete datalist with region stall owners
+    if (data.ownerNames?.length) {
+      ownersList.innerHTML = data.ownerNames.map(n => `<option value="${esc(n)}">`).join('');
+    }
 
     // Update nearest market display
     const nm = data.nearestMarket;
@@ -184,16 +243,21 @@ function buildStallMap() {
     for (const it of stall.items) {
       if (!map[it.id]) map[it.id] = [];
       map[it.id].push({
+        name:        stall.name,
         owner:       stall.owner,
         claimName:   stall.claimName,
         distance:    stall.distance,
+        watched:     stall.watched || false,
         qty:         it.qty,
         stock:       it.stock,
         price_parts: it.price_parts || [],
       });
     }
   }
-  for (const k of Object.keys(map)) map[k].sort((a, b) => a.distance - b.distance);
+  for (const k of Object.keys(map)) map[k].sort((a, b) => {
+    if (a.watched !== b.watched) return a.watched ? -1 : 1;
+    return a.distance - b.distance;
+  });
   return map;
 }
 
@@ -240,6 +304,7 @@ function render() {
   emptyMsg.textContent = '';
   mainTbl.style.display = '';
   tblBody.innerHTML = tasks.map(renderRow).join('');
+  bindTips();
 }
 
 function decorateTask(task, stallMap) {
@@ -299,8 +364,11 @@ function renderRow(task) {
   const invHtml = task.items.map(item => {
     if (!item.inv_have) return `<span class="dim">—</span>`;
     const cls = item.inv_have >= item.qty ? 'inv-ok' : 'inv-part';
-    const tip = `${item.inv_have.toLocaleString()} / ${item.qty.toLocaleString()} needed`;
-    return `<span class="${cls}" title="${esc(tip)}">${item.inv_have.toLocaleString()}</span>`;
+    const locs = (item.inv_locations || [])
+      .map(l => `${l.qty.toLocaleString()} in ${l.label}`)
+      .join('\n');
+    const tipText = `${item.inv_have.toLocaleString()} / ${item.qty.toLocaleString()} needed${locs ? '\n' + locs : ''}`;
+    return `<span class="${cls}" data-tip="${esc(tipText)}">${item.inv_have.toLocaleString()}</span>`;
   }).join('<br>');
 
   // Nearby stalls column
@@ -316,7 +384,9 @@ function renderRow(task) {
       const profitStr = profit != null
         ? ` <span class="${profit >= 0 ? 'profit-pos' : 'profit-neg'}">(${HEX}${profit.toLocaleString()})</span>`
         : '';
-      return `<span class="stall-name">${esc(m.owner)}</span>${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
+      const watchedMark = m.watched ? `<span style="color:#f0a500" title="Watched">★ </span>` : '';
+      const displayName = m.name !== m.owner && m.name ? m.name : m.owner;
+      return `${watchedMark}<span class="stall-name">${esc(displayName)}</span>${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
     });
     return lines.join('<br>');
   }).join('<br>');
@@ -428,157 +498,13 @@ function scheduleRefresh() {
   S.refreshCdTimer = setInterval(tick, 1000);
 }
 
-// ── Mini-map ──────────────────────────────────────────────────────────────────
-const mapSection = $('map-section');
-const mapCanvas  = $('map-canvas');
-const mapTip     = $('map-tip');
-
-function drawMiniMap() {
-  if (!mapCanvas || !S.player?.locationX || !S.stallsLoaded) return;
-  mapSection.classList.add('visible');
-
-  const ctx  = mapCanvas.getContext('2d');
-  const W    = mapCanvas.width, H = mapCanvas.height;
-  const cx   = W / 2, cy = H / 2;
-  const R        = Math.min(W, H) / 2 - 2;
-  const rawRange = S.stallRange * 3; // slider is display units; coordinates are raw (×3)
-  const scale    = R / rawRange;
-  const px   = S.player.locationX, pz = S.player.locationZ;
-
-  ctx.clearRect(0, 0, W, H);
-
-  // ── Background disc ──
-  ctx.beginPath();
-  ctx.arc(cx, cy, R, 0, Math.PI * 2);
-  ctx.fillStyle = '#07070f';
-  ctx.fill();
-
-  // ── Clip all inner drawing to the disc ──
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cx, cy, R, 0, Math.PI * 2);
-  ctx.clip();
-
-  // Range rings
-  ctx.strokeStyle = '#14142a';
-  ctx.lineWidth = 1;
-  [0.25, 0.5, 0.75].forEach(f => {
-    ctx.beginPath();
-    ctx.arc(cx, cy, R * f, 0, Math.PI * 2);
-    ctx.stroke();
+// ── Data-tip hover ────────────────────────────────────────────────────────────
+function bindTips() {
+  tblBody.querySelectorAll('[data-tip]').forEach(el => {
+    el.addEventListener('mouseenter', e => showTip(e, esc(el.dataset.tip).replace(/\n/g, '<br>')));
+    el.addEventListener('mouseleave', hideTip);
   });
-
-  // Cardinal crosshairs
-  ctx.strokeStyle = '#14142a';
-  ctx.setLineDash([2, 5]);
-  ctx.beginPath();
-  ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R);
-  ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // ── Stall icons ──
-  for (const stall of S.stalls) {
-    if (stall.x == null) continue;
-    const sx = cx + (stall.x - px) * scale;
-    const sy = cy - (stall.z - pz) * scale; // flip Z: north = up
-    drawStallIcon(ctx, sx, sy);
-  }
-
-  ctx.restore();
-
-  // ── Range border ──
-  ctx.beginPath();
-  ctx.arc(cx, cy, R, 0, Math.PI * 2);
-  ctx.strokeStyle = '#f0a50055';
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([6, 5]);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // ── Player dot ──
-  ctx.beginPath();
-  ctx.arc(cx, cy, 6, 0, Math.PI * 2);
-  ctx.fillStyle = '#f0a500';
-  ctx.fill();
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-
-  // ── Compass N ──
-  ctx.fillStyle = '#ffffff30';
-  ctx.font = 'bold 10px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.fillText('N', cx, cy - R + 14);
-  ctx.fillText('S', cx, cy + R - 5);
-  ctx.fillText('E', cx + R - 5, cy + 4);
-  ctx.fillText('W', cx - R + 5, cy + 4);
-
-  // ── Stall count ──
-  ctx.fillStyle = '#c97bff88';
-  ctx.font = '10px sans-serif';
-  ctx.textAlign = 'left';
-  ctx.fillText(`${S.stalls.length} stall${S.stalls.length !== 1 ? 's' : ''}`, cx - R + 8, cy + R - 6);
 }
-
-function drawStallIcon(ctx, x, y) {
-  const s = 5;
-  ctx.fillStyle = '#c97bff';
-  ctx.strokeStyle = '#e8b0ff99';
-  ctx.lineWidth = 0.8;
-  // Roof
-  ctx.beginPath();
-  ctx.moveTo(x, y - s * 1.6);
-  ctx.lineTo(x - s, y - s * 0.3);
-  ctx.lineTo(x + s, y - s * 0.3);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-  // Body
-  ctx.fillRect(x - s * 0.65, y - s * 0.3, s * 1.3, s * 1.3);
-  ctx.strokeRect(x - s * 0.65, y - s * 0.3, s * 1.3, s * 1.3);
-}
-
-function initMapHover() {
-  if (!mapCanvas || !mapTip) return;
-
-  mapCanvas.addEventListener('mousemove', e => {
-    if (!S.player?.locationX || !S.stallsLoaded) return;
-    const rect  = mapCanvas.getBoundingClientRect();
-    const mx    = e.clientX - rect.left;
-    const my    = e.clientY - rect.top;
-    const W     = mapCanvas.width, H = mapCanvas.height;
-    const cx    = W / 2, cy = H / 2;
-    const R     = Math.min(W, H) / 2 - 2;
-    const scale = R / (S.stallRange * 3);
-    const px    = S.player.locationX, pz = S.player.locationZ;
-
-    let found = null;
-    for (const stall of S.stalls) {
-      if (stall.x == null) continue;
-      const sx = cx + (stall.x - px) * scale;
-      const sy = cy - (stall.z - pz) * scale;
-      if (Math.hypot(mx - sx, my - sy) < 10) { found = stall; break; }
-    }
-
-    if (found) {
-      mapTip.style.display = 'block';
-      mapTip.style.left = (e.clientX + 14) + 'px';
-      mapTip.style.top  = (e.clientY + 14) + 'px';
-      const itemList = (found.items || []).slice(0, 4).map(i => esc(i.name)).join('<br>');
-      mapTip.innerHTML =
-        `<strong style="color:#c97bff">${esc(found.owner)}</strong> · <span class="sub">${Math.round(found.distance / 3)}h</span><br>` +
-        `<span style="color:#888">${esc(found.claimName)}</span>` +
-        (itemList ? `<br><span style="color:#aaa">${itemList}</span>` : '');
-    } else {
-      mapTip.style.display = 'none';
-    }
-  });
-
-  mapCanvas.addEventListener('mouseleave', () => { mapTip.style.display = 'none'; });
-}
-
-initMapHover();
 
 // ── CSV export ────────────────────────────────────────────────────────────────
 function downloadCsv() {

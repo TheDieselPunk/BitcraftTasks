@@ -118,6 +118,27 @@ def build_inv_map(inv_data):
     return totals
 
 
+def build_inv_detail_map(inv_data):
+    """
+    Build {item_id_str: [{qty, label}]} from a player inventories response.
+    label = inventoryName (+ "@ claimName" if stored remotely).
+    """
+    details = {}
+    for bag in inv_data.get('inventories', []):
+        raw_name = bag.get('inventoryName') or bag.get('buildingName') or 'Inventory'
+        claim    = bag.get('claimName')
+        label    = f"{raw_name} @ {claim}" if claim else raw_name
+        for pocket in bag.get('pockets', []):
+            c = pocket.get('contents')
+            if not c:
+                continue
+            k = str(c['itemId'])
+            if k not in details:
+                details[k] = []
+            details[k].append({'qty': c.get('quantity', 0), 'label': label})
+    return details
+
+
 def build_name_maps(items_data, cargo_data):
     """
     Build {id_str: name_str} maps from /api/items and /api/cargo responses.

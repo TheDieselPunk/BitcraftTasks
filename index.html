@@ -34,6 +34,7 @@
       white-space: nowrap;
     }
     #logo span { color: #444466; font-weight: 400; font-size: .75rem; letter-spacing: .04em; }
+    #logo-desc { color: #333355; font-size: .7rem; font-weight: 400; letter-spacing: .02em; text-transform: none; margin-top: 2px; }
 
     #search-row { display: flex; gap: 8px; flex: 1; max-width: 360px; }
     #search-row input {
@@ -78,6 +79,43 @@
     }
     #range-group input[type=range] { width: 110px; accent-color: #f0a500; }
     #range-val { color: #f0a500; font-weight: 700; min-width: 36px; }
+
+    /* ── Watch row ── */
+    #watch-row {
+      display: none;
+      background: #090916;
+      border-bottom: 1px solid #1a1a3a;
+      padding: 7px 20px;
+      gap: 8px; align-items: center; flex-wrap: wrap;
+      font-size: .75rem;
+    }
+    #watch-row.visible { display: flex; }
+    #watch-label { color: #444466; white-space: nowrap; }
+    #watch-input {
+      padding: 5px 10px; border-radius: 4px;
+      border: 1px solid #2a2a5a; background: #09091a;
+      color: #c8c8dc; font-size: .8rem; width: 180px;
+    }
+    #watch-input:focus { outline: none; border-color: #b47cff; }
+    #btn-watch-add {
+      padding: 5px 12px; border: 1px solid #3a2a6a; border-radius: 4px;
+      background: #14092a; color: #b47cff;
+      font-size: .72rem; font-weight: 700; cursor: pointer;
+      letter-spacing: .05em; text-transform: uppercase;
+    }
+    #btn-watch-add:hover { background: #1e0f3a; border-color: #b47cff; }
+    #watch-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+    .watch-chip {
+      display: flex; align-items: center; gap: 5px;
+      background: #1a0a30; border: 1px solid #3a2060;
+      border-radius: 12px; padding: 2px 10px 2px 10px;
+      color: #b47cff; font-size: .7rem; cursor: default;
+    }
+    .watch-chip button {
+      background: none; border: none; color: #6a4a99;
+      font-size: .8rem; cursor: pointer; padding: 0; line-height: 1;
+    }
+    .watch-chip button:hover { color: #e05050; }
 
     /* ── Toolbar ── */
     #toolbar {
@@ -151,54 +189,32 @@
 
     #empty-msg { padding: 40px 20px; color: #333355; font-size: .9rem; }
 
-    /* ── Mini-map ── */
-    #map-section {
-      display: none;
-      flex-direction: column;
-      align-items: center;
-      padding: 12px 20px 0;
-      gap: 6px;
-    }
-    #map-section.visible { display: flex; }
-    #map-wrap {
-      position: relative;
-      width: 320px;
-      height: 320px;
-    }
-    #map-canvas {
-      border-radius: 50%;
-      border: 1px solid #2a2a4a;
-      cursor: crosshair;
-      display: block;
-    }
-    #map-tip {
+    /* ── Custom tooltip ── */
+    #tip-box {
       position: fixed;
       background: #0d0d1e;
       border: 1px solid #3a3a5a;
       color: #ccc;
       font-size: .72rem;
-      padding: 5px 10px;
+      padding: 6px 10px;
       border-radius: 5px;
       pointer-events: none;
       display: none;
-      white-space: nowrap;
+      white-space: pre;
       z-index: 100;
       font-family: inherit;
       line-height: 1.5;
-    }
-    #map-label {
-      font-size: .7rem;
-      color: #444466;
-      letter-spacing: .06em;
     }
   </style>
 </head>
 <body>
 
   <div id="topbar">
-    <div id="logo">⬡ Traveler Tasks <span>— BitCraft Assistant</span></div>
+    <div id="logo">⬡ Traveler Tasks <span>— BitCraft Assistant</span>
+      <div id="logo-desc">Look up your active traveler tasks · find nearby trader stands · track market prices</div>
+    </div>
     <div id="search-row">
-      <input id="username-input" type="text" placeholder="Enter player name…" autocomplete="off">
+      <input id="username-input" type="text" placeholder="Enter player name…" list="stall-owners-list" autocomplete="off">
       <button id="btn-search">Search</button>
     </div>
   </div>
@@ -217,13 +233,14 @@
     </div>
   </div>
 
-  <div id="map-section">
-    <div id="map-wrap">
-      <canvas id="map-canvas" width="320" height="320"></canvas>
-      <div id="map-tip"></div>
-    </div>
-    <div id="map-label">TRADER STANDS WITHIN RANGE</div>
+  <div id="watch-row">
+    <span id="watch-label">Watch traders:</span>
+    <input id="watch-input" type="text" placeholder="Type a player name…" list="stall-owners-list" autocomplete="off">
+    <button id="btn-watch-add">+ Add</button>
+    <div id="watch-chips"></div>
   </div>
+  <datalist id="stall-owners-list"></datalist>
+  <div id="tip-box"></div>
 
   <div id="toolbar">
     <button id="btn-refresh">↺ Refresh</button>

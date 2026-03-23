@@ -96,6 +96,10 @@ class handler(BaseHTTPRequestHandler):
 
         region_id = params.get('regionId', [None])[0]
 
+        # Watched trader names — always included regardless of range
+        watch_raw  = params.get('watch', [''])[0]
+        watch_names = {n.strip().lower() for n in watch_raw.split(',') if n.strip()}
+
         try:
             PAGE_SIZE = 100
             first     = api_get('/api/stalls', {'limit': PAGE_SIZE, 'page': 1})
@@ -119,6 +123,22 @@ class handler(BaseHTTPRequestHandler):
             if region_id:
                 stalls_raw = [s for s in stalls_raw if str(s.get('regionId', '')) == str(region_id)]
 
+            # Build claim → coords map from stalls that have coordinates.
+            # Used to assign a fallback position to null-coord barter stalls.
+            claim_coords = {}
+            for s in stalls_raw:
+                cx, cz, cn = s.get('locationX'), s.get('locationZ'), s.get('claimName')
+                if cx is not None and cz is not None and cn and cn not in claim_coords:
+                    claim_coords[cn] = (float(cx), float(cz))
+
+            # Nearest claim to player (from coord stalls)
+            fallback_x, fallback_z, fallback_name = px, pz, None
+            fallback_dist = float('inf')
+            for cname, (cx, cz) in claim_coords.items():
+                d = distance(px, pz, cx, cz)
+                if d < fallback_dist:
+                    fallback_dist, fallback_x, fallback_z, fallback_name = d, cx, cz, cname
+
             nearby         = []   # all stalls within range (for minimap)
             all_with_dist  = []   # all stalls globally with distance, for nearest market
 
@@ -126,25 +146,31 @@ class handler(BaseHTTPRequestHandler):
                 sx = stall.get('locationX')
                 sz = stall.get('locationZ')
                 if sx is None or sz is None:
-                    continue
+                    # Barter stall with no coordinates — pin to nearest claim if in player's region
+                    if region_id and str(stall.get('regionId', '')) == str(region_id) and fallback_name:
+                        sx, sz = fallback_x, fallback_z
+                    else:
+                        continue
 
                 dist  = distance(px, pz, float(sx), float(sz))
                 items = parse_sell_items(stall, dist)
+                owner = stall.get('ownerName', '')
 
                 entry = {
-                    'name':      stall.get('nickname') or stall.get('ownerName', 'Stall'),
-                    'owner':     stall.get('ownerName', ''),
-                    'claimName': stall.get('claimName', ''),
+                    'name':      stall.get('nickname') or owner or 'Stall',
+                    'owner':     owner,
+                    'claimName': stall.get('claimName') or fallback_name or '',
                     'distance':  round(dist),
                     'x':         float(sx),
                     'z':         float(sz),
-                    'items':     items,   # empty list for buy-only stalls
+                    'items':     items,
+                    'watched':   owner.lower() in watch_names,
                 }
 
                 if items:
                     all_with_dist.append(entry)
 
-                if dist <= search_range:
+                if dist <= search_range or entry['watched']:
                     nearby.append(entry)
 
             nearby.sort(key=lambda s: s['distance'])
@@ -179,11 +205,19 @@ class handler(BaseHTTPRequestHandler):
                     'items':      price_map,
                 }
 
+            # Collect all owner names for autocomplete
+            owner_names = sorted({
+                s.get('ownerName') or s.get('nickname', '')
+                for s in stalls_raw
+                if s.get('ownerName') or s.get('nickname')
+            })
+
             self._send(200, {
                 'stalls':        nearby,
                 'count':         len(nearby),
                 'range':         search_range,
                 'nearestMarket': nearest_market,
+                'ownerNames':    owner_names,
             })
 
         except Exception as e:

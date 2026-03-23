@@ -16,10 +16,10 @@ from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _lib import api_get, build_inv_map, build_name_maps, get_craft_info, get_market_price, cors_headers
+from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, cors_headers
 
 
-def build_tasks(tasks_data, inv_map, items_map, cargo_map):
+def build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map):
     tasks = []
     for task in tasks_data.get('tasks', []):
         if task.get('completed'):
@@ -42,11 +42,12 @@ def build_tasks(tasks_data, inv_map, items_map, cargo_map):
             have     = inv_map.get(id_str, 0)
 
             items.append({
-                'id':       id_str,
-                'name':     name,
-                'type':     req.get('item_type', 'item'),
-                'qty':      qty,
-                'inv_have': have,
+                'id':           id_str,
+                'name':         name,
+                'type':         req.get('item_type', 'item'),
+                'qty':          qty,
+                'inv_have':     have,
+                'inv_locations': inv_detail.get(id_str, []),
             })
 
         if not items:
@@ -102,9 +103,10 @@ class handler(BaseHTTPRequestHandler):
             cargo_data = results.get('cargo', [])
 
             inv_map              = build_inv_map(inv_data)
+            inv_detail           = build_inv_detail_map(inv_data)
             items_map, cargo_map = build_name_maps(items_data, cargo_data)
 
-            tasks = build_tasks(tasks_data, inv_map, items_map, cargo_map)
+            tasks = build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map)
 
             if not tasks:
                 self._send(200, {'tasks': [], 'expiry': tasks_data.get('expirationTimestamp')})
