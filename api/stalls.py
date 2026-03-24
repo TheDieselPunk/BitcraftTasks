@@ -23,14 +23,32 @@ INFINITE_STOCK = 2_000_000_000
 
 
 def parse_sell_items(stall, dist):
-    """Extract sell-side orders from a stall into a flat item list."""
-    items = []
+    """Extract sell-side orders from a stall into a flat item list, one entry per item (cheapest)."""
+    # item_id → best entry (lowest Hex Coin price, or first if no coin price)
+    best = {}
+
+    def _coin_price(parts):
+        for p in parts:
+            if p['name'] == 'Hex Coin':
+                return p['qty']
+        return float('inf')
+
+    def _upsert(item_id, name, offer_qty, stock, price_parts):
+        entry = {
+            'id':          item_id,
+            'name':        name,
+            'qty':         offer_qty,
+            'stock':       stock,
+            'price_parts': price_parts,
+        }
+        if item_id not in best or _coin_price(price_parts) < _coin_price(best[item_id]['price_parts']):
+            best[item_id] = entry
+
     for order in stall.get('orders', []):
         stock = order.get('remainingStock', 0)
         req   = order.get('requiredItems', [])
         req_c = order.get('requiredCargo', [])
 
-        # Build full price parts list — requiredCargo uses itemId/itemName (not cargoId/cargoName)
         raw_price_parts = [
             {'qty': r.get('quantity', 1), 'name': r.get('itemName', '') or r.get('cargoName', '')}
             for r in (req + req_c)
@@ -42,18 +60,12 @@ def parse_sell_items(stall, dist):
             offer_qty = max(offer.get('quantity', 1), 1)
             if not item_id:
                 continue
-            # Normalise price to per-unit (e.g. 60 hex for 5 items → 12 hex each)
             price_parts = [
                 {'qty': round(p['qty'] / offer_qty), 'name': p['name']}
                 for p in raw_price_parts
             ]
-            items.append({
-                'id':          item_id,
-                'name':        offer.get('itemName', ''),
-                'qty':         offer_qty,
-                'stock':       None if stock >= INFINITE_STOCK else stock,
-                'price_parts': price_parts,
-            })
+            _upsert(item_id, offer.get('itemName', ''), offer_qty,
+                    None if stock >= INFINITE_STOCK else stock, price_parts)
 
         for offer in order.get('offerCargo', []):
             cargo_id  = str(offer.get('itemId', '') or offer.get('cargoId', ''))
@@ -64,15 +76,10 @@ def parse_sell_items(stall, dist):
                 {'qty': round(p['qty'] / offer_qty), 'name': p['name']}
                 for p in raw_price_parts
             ]
-            items.append({
-                'id':          cargo_id,
-                'name':        offer.get('itemName', '') or offer.get('cargoName', ''),
-                'qty':         offer_qty,
-                'stock':       None if stock >= INFINITE_STOCK else stock,
-                'price_parts': price_parts,
-            })
+            _upsert(cargo_id, offer.get('itemName', '') or offer.get('cargoName', ''),
+                    offer_qty, None if stock >= INFINITE_STOCK else stock, price_parts)
 
-    return items
+    return list(best.values())
 
 
 class handler(BaseHTTPRequestHandler):
