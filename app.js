@@ -19,6 +19,7 @@ const S = {
   player:        null,
   tasks:         [],
   stalls:        [],
+  barterSources: [],
   marketMap:     {},
   marketClaim:   null,
   sortCol:       'profit',
@@ -171,9 +172,10 @@ async function load() {
   S.tasksLoaded  = false;
   S.stallsLoaded = false;
   S.tasks        = [];
-  S.stalls       = [];
-  S.marketMap    = {};
-  S.marketClaim  = null;
+  S.stalls        = [];
+  S.barterSources = [];
+  S.marketMap     = {};
+  S.marketClaim   = null;
   clearTimers();
   setStatus('Loading…');
   emptyMsg.textContent = '';
@@ -211,12 +213,14 @@ async function loadStalls() {
   try {
     const params = [`x=${x}`, `z=${z}`, `range=${S.stallRange * 3}`];
     if (regionId) params.push(`regionId=${regionId}`);
+    if (S.player.nearestClaimId) params.push(`claimId=${S.player.nearestClaimId}`);
     if (S.watchedStalls.length) params.push(`watch=${encodeURIComponent(S.watchedStalls.join(','))}`);
     const data = await apiFetch(`/api/stalls?${params.join('&')}`);
-    S.stalls       = data.stalls || [];
-    S.marketMap    = data.nearestMarket?.items  || {};
-    S.marketClaim  = data.nearestMarket || null;
-    S.stallsLoaded = true;
+    S.stalls        = data.stalls || [];
+    S.barterSources = data.barterSources || [];
+    S.marketMap     = data.nearestMarket?.items  || {};
+    S.marketClaim   = data.nearestMarket || null;
+    S.stallsLoaded  = true;
 
     // Populate autocomplete datalist with region stall owners
     if (data.ownerNames?.length) {
@@ -248,14 +252,33 @@ function buildStallMap() {
         claimName:   stall.claimName,
         distance:    stall.distance,
         watched:     stall.watched || false,
+        isBarter:    false,
         qty:         it.qty,
         stock:       it.stock,
         price_parts: it.price_parts || [],
       });
     }
   }
+  // Add barter stall sources (claim inventory)
+  for (const bs of S.barterSources) {
+    for (const [itemId, itemData] of Object.entries(bs.items)) {
+      if (!map[itemId]) map[itemId] = [];
+      map[itemId].push({
+        name:        bs.nickname,
+        owner:       '',
+        claimName:   bs.claimName,
+        distance:    bs.distance,
+        watched:     false,
+        isBarter:    true,
+        qty:         itemData.qty,
+        stock:       itemData.qty,
+        price_parts: [],
+      });
+    }
+  }
   for (const k of Object.keys(map)) map[k].sort((a, b) => {
     if (a.watched !== b.watched) return a.watched ? -1 : 1;
+    if (a.isBarter !== b.isBarter) return a.isBarter ? 1 : -1;
     return a.distance - b.distance;
   });
   return map;
@@ -313,13 +336,13 @@ function decorateTask(task, stallMap) {
     return { ...item, stall_matches: nearby };
   });
 
-  // Cost: pick the cheapest price across nearest-market stalls + all nearby stalls
+  // Cost: cheapest coin price (barter sources have no coin cost — excluded)
   let totalCost = 0, costKnown = true;
   for (const item of items) {
     const candidates = [];
     if (item.market_price != null) candidates.push(item.market_price);
-    // Prices from nearby stalls
     for (const m of (item.stall_matches || [])) {
+      if (m.isBarter) continue;
       const sp = hexPrice(m.price_parts);
       if (sp != null) candidates.push(sp);
     }
@@ -377,8 +400,12 @@ function renderRow(task) {
     const matches = item.stall_matches || [];
     if (!matches.length) return `<span class="na">—</span>`;
     const lines = matches.map(m => {
-      const ph        = priceHtml(m.price_parts);
       const distStr   = `<span class="sub">${Math.round(m.distance / 3).toLocaleString()}h</span>`;
+      if (m.isBarter) {
+        const claimStr = m.claimName ? ` <span class="sub">(${esc(m.claimName)} · Barter Stall)</span>` : ` <span class="sub">(Barter Stall)</span>`;
+        return `<span class="stall-name">${esc(m.name)}</span>${claimStr} <span class="sub profit-neutral">(⬡0)</span> ${distStr}`;
+      }
+      const ph        = priceHtml(m.price_parts);
       const coinPrice = hexPrice(m.price_parts);
       const profit    = coinPrice != null ? task.reward - coinPrice * item.qty : null;
       const profitStr = profit != null
@@ -386,9 +413,8 @@ function renderRow(task) {
         : '';
       const watchedMark = m.watched ? `<span style="color:#f0a500" title="Watched">★ </span>` : '';
       const displayName = m.name !== m.owner && m.name ? m.name : m.owner;
-      // If the displayed name is a nickname (not the owner), show the claim name for context
-      const isBarter = m.name && m.owner !== m.name;
-      const claimStr  = isBarter && m.claimName ? ` <span class="sub">(${esc(m.claimName)})</span>` : '';
+      const claimStr  = m.name && m.owner !== m.name && m.claimName
+        ? ` <span class="sub">(${esc(m.claimName)})</span>` : '';
       return `${watchedMark}<span class="stall-name">${esc(displayName)}</span>${claimStr}${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
     });
     return lines.join('<br>');

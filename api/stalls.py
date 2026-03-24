@@ -227,6 +227,50 @@ class handler(BaseHTTPRequestHandler):
                     'items':      price_map,
                 }
 
+            # Fetch barter stall inventory from the specified claim
+            claim_id = params.get('claimId', [None])[0]
+            barter_sources = []
+            if claim_id:
+                try:
+                    inv = api_get(f'/api/claims/{claim_id}/inventories')
+                    items_lut  = {str(it['id']): it['name'] for it in inv.get('items',  [])}
+                    cargos_lut = {str(c['id']):  c['name']  for c in inv.get('cargos', [])}
+                    barter_claim_name = nearest_market['claimName'] if nearest_market else ''
+
+                    for bldg in inv.get('buildings', []):
+                        bname = bldg.get('buildingName', '')
+                        if 'barter' not in bname.lower() and 'counter' not in bname.lower():
+                            continue
+                        nickname = bldg.get('buildingNickname') or bname
+                        stall_items = {}
+                        for slot in bldg.get('inventory', []):
+                            c = slot.get('contents')
+                            if not c:
+                                continue
+                            item_id = str(c.get('item_id', ''))
+                            qty     = c.get('quantity', 0)
+                            itype   = c.get('item_type', 'item')
+                            if item_id and qty > 0:
+                                lut = cargos_lut if itype == 'cargo' else items_lut
+                                if item_id not in stall_items:
+                                    stall_items[item_id] = {'name': lut.get(item_id, ''), 'qty': 0, 'type': itype}
+                                stall_items[item_id]['qty'] += qty
+
+                        if stall_items:
+                            # Distance to this claim
+                            dist_to_claim = nearest_market['distance'] if nearest_market else 0
+                            if barter_claim_name and barter_claim_name in claim_coords:
+                                cx, cz = claim_coords[barter_claim_name]
+                                dist_to_claim = round(distance(px, pz, cx, cz))
+                            barter_sources.append({
+                                'nickname':  nickname,
+                                'claimName': barter_claim_name,
+                                'distance':  dist_to_claim,
+                                'items':     stall_items,
+                            })
+                except Exception:
+                    pass
+
             # Collect all owner names for autocomplete
             owner_names = sorted({
                 s.get('ownerName') or s.get('nickname', '')
@@ -240,6 +284,7 @@ class handler(BaseHTTPRequestHandler):
                 'range':         search_range,
                 'nearestMarket': nearest_market,
                 'ownerNames':    owner_names,
+                'barterSources': barter_sources,
             })
 
         except Exception as e:
