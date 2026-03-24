@@ -1,15 +1,7 @@
 {
-  "builds": [
-    { "src": "api/search.py", "use": "@vercel/python" },
-    { "src": "api/tasks.py",  "use": "@vercel/python" },
-    { "src": "api/stalls.py", "use": "@vercel/python" },
-    { "src": "index.html",   "use": "@vercel/static"  },
-    { "src": "app.js",       "use": "@vercel/static"  }
-  ],
-  "routes": [
-    { "src": "/api/search", "dest": "/api/search.py" },
-    { "src": "/api/tasks",  "dest": "/api/tasks.py"  },
-    { "src": "/api/stalls", "dest": "/api/stalls.py" },
-    { "src": "/(.*)",       "dest": "/$1"            }
+  "rewrites": [
+    { "source": "/api/search", "destination": "/api/search.py" },
+    { "source": "/api/tasks",  "destination": "/api/tasks.py"  },
+    { "source": "/api/stalls", "destination": "/api/stalls.py" }
   ]
 }
