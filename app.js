@@ -110,7 +110,7 @@ function removeWatch(name) {
 
 function renderWatchChips() {
   watchChips.innerHTML = S.watchedStalls.map(n =>
-    `<span class="watch-chip">${esc(n)}<button onclick="removeWatch(${JSON.stringify(n)})" title="Remove">×</button></span>`
+    `<span class="watch-chip">${esc(n)}<button onclick='removeWatch(${JSON.stringify(n)})' title="Remove">×</button></span>`
   ).join('');
 }
 
