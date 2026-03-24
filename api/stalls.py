@@ -46,6 +46,9 @@ def parse_sell_items(stall, dist):
 
     for order in stall.get('orders', []):
         stock = order.get('remainingStock', 0)
+        # Skip orders with no stock (but keep infinite-stock orders)
+        if stock == 0:
+            continue
         req   = order.get('requiredItems', [])
         req_c = order.get('requiredCargo', [])
 
@@ -182,8 +185,15 @@ class handler(BaseHTTPRequestHandler):
                 if items:
                     all_with_dist.append(entry)
 
-                if dist <= search_range or entry['watched']:
-                    nearby.append(entry)
+                is_trader_stand = bool(owner)   # has ownerName → player-placed trader stand
+                if is_trader_stand:
+                    # Trader stands: only include if explicitly watched
+                    if is_watched:
+                        nearby.append(entry)
+                else:
+                    # Barter stalls: include if within range
+                    if dist <= search_range:
+                        nearby.append(entry)
 
             nearby.sort(key=lambda s: s['distance'])
             all_with_dist.sort(key=lambda s: s['distance'])
