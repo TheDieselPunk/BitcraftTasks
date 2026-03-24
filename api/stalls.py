@@ -154,17 +154,22 @@ class handler(BaseHTTPRequestHandler):
 
                 dist  = distance(px, pz, float(sx), float(sz))
                 items = parse_sell_items(stall, dist)
-                owner = stall.get('ownerName', '')
+                owner    = stall.get('ownerName', '') or ''
+                nickname = stall.get('nickname', '')  or ''
+                is_watched = bool(watch_names and (
+                    owner.lower()    in watch_names or
+                    nickname.lower() in watch_names
+                ))
 
                 entry = {
-                    'name':      stall.get('nickname') or owner or 'Stall',
+                    'name':      nickname or owner or 'Stall',
                     'owner':     owner,
                     'claimName': stall.get('claimName') or fallback_name or '',
                     'distance':  round(dist),
                     'x':         float(sx),
                     'z':         float(sz),
                     'items':     items,
-                    'watched':   owner.lower() in watch_names,
+                    'watched':   is_watched,
                 }
 
                 if items:

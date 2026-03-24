@@ -24,7 +24,7 @@ const S = {
   sortCol:       'profit',
   sortAsc:       false,
   filterOn:      false,
-  stallRange:    250,
+  stallRange:    100,
   expiry:        null,
   tasksLoaded:   false,
   stallsLoaded:  false,
@@ -386,7 +386,10 @@ function renderRow(task) {
         : '';
       const watchedMark = m.watched ? `<span style="color:#f0a500" title="Watched">★ </span>` : '';
       const displayName = m.name !== m.owner && m.name ? m.name : m.owner;
-      return `${watchedMark}<span class="stall-name">${esc(displayName)}</span>${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
+      // If the displayed name is a nickname (not the owner), show the claim name for context
+      const isBarter = m.name && m.owner !== m.name;
+      const claimStr  = isBarter && m.claimName ? ` <span class="sub">(${esc(m.claimName)})</span>` : '';
+      return `${watchedMark}<span class="stall-name">${esc(displayName)}</span>${claimStr}${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
     });
     return lines.join('<br>');
   }).join('<br>');
