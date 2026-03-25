@@ -262,7 +262,6 @@ class handler(BaseHTTPRequestHandler):
             self._send(200, {
                 'stalls':        nearby,
                 'count':         len(nearby),
-                'range':         search_range,
                 'nearestMarket': nearest_market,
                 'ownerNames':    owner_names,
                 'barterSources': barter_sources,
