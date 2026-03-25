@@ -454,9 +454,7 @@ function renderRow(task) {
         : '';
       const watchedMark = m.watched ? `<span style="color:#f0a500" title="Watched">★ </span>` : '';
       const displayName = m.name !== m.owner && m.name ? m.name : m.owner;
-      const claimStr  = m.name && m.owner !== m.name && m.claimName
-        ? ` <span class="sub">(${esc(m.claimName)})</span>` : '';
-      return `${watchedMark}<span class="stall-name">${esc(displayName)}</span>${claimStr}${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
+      return `${watchedMark}<span class="stall-name">${esc(displayName)}</span>${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
     });
     return lines.join('<br>');
   }).join('<br>');
@@ -475,12 +473,12 @@ function renderRow(task) {
     const ci = item.craft_info;
     if (!ci || ci.status === 'none') return `<span class="craft-no">—</span>`;
     const tip = (ci.details || []).map(d =>
-      `${d.name}: ${d.have.toLocaleString()} / ${d.need.toLocaleString()}`
+      `${esc(d.name)}: ${d.have.toLocaleString()} / ${d.need.toLocaleString()}`
     ).join('\n');
     const bld = ci.building ? ` <span class="sub">(${esc(ci.building)})</span>` : '';
-    if (ci.status === 'yes')     return `<span class="craft-ok" title="${esc(tip)}">✓${bld}</span>`;
-    if (ci.status === 'partial') return `<span class="inv-part" title="${esc(tip)}">~${bld}</span>`;
-    return `<span class="craft-no" title="${esc(tip)}">✗${bld}</span>`;
+    if (ci.status === 'yes')     return `<span class="craft-ok" data-tip="${tip}">✓${bld}</span>`;
+    if (ci.status === 'partial') return `<span class="inv-part" data-tip="${tip}">~${bld}</span>`;
+    return `<span class="craft-no" data-tip="${tip}">✗${bld}</span>`;
   }).join('<br>');
 
   const costStr    = task.cost   != null ? `${HEX} ${task.cost.toLocaleString()}`   : `<span class="dim">—</span>`;
