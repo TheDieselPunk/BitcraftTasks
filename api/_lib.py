@@ -6,6 +6,7 @@ import json
 import math
 import urllib.request
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 API_BASE = 'https://bitjita.com'
 HEADERS = {
@@ -78,12 +79,27 @@ def get_claims(x, z, region_id):
     all_claims_list: [{id, name, dist}] in display units (raw / 3), sorted nearest-first.
     """
     try:
-        params = {'regionId': region_id} if region_id else {}
-        data   = api_get('/api/claims', params)
-        if isinstance(data, list):
-            claims = data
+        PAGE_SIZE  = 100
+        api_params = {'regionId': region_id, 'limit': PAGE_SIZE, 'page': 1} if region_id else {'limit': PAGE_SIZE, 'page': 1}
+        first      = api_get('/api/claims', api_params)
+        if isinstance(first, list):
+            claims = list(first)
         else:
-            claims = data.get('claims') or data.get('data') or []
+            claims      = list(first.get('claims') or first.get('data') or [])
+            total_count = int(first.get('count', len(claims)))
+            total_pages = math.ceil(total_count / PAGE_SIZE)
+            if total_pages > 1:
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    futs = {
+                        pool.submit(api_get, '/api/claims', {**api_params, 'page': p}): p
+                        for p in range(2, total_pages + 1)
+                    }
+                    for f in as_completed(futs):
+                        try:
+                            r = f.result()
+                            claims.extend(r.get('claims') or r.get('data') or [])
+                        except Exception:
+                            pass
 
         with_dist = []
         for c in claims:
