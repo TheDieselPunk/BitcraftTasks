@@ -228,14 +228,15 @@ class handler(BaseHTTPRequestHandler):
                 }
 
             # Fetch barter stall inventory from the specified claim
-            claim_id = params.get('claimId', [None])[0]
-            barter_sources = []
+            claim_id         = params.get('claimId',    [None])[0]
+            claim_name_param = params.get('claimName',  [''])[0]
+            barter_sources   = []
             if claim_id:
                 try:
                     inv = api_get(f'/api/claims/{claim_id}/inventories')
                     items_lut  = {str(it['id']): it['name'] for it in inv.get('items',  [])}
                     cargos_lut = {str(c['id']):  c['name']  for c in inv.get('cargos', [])}
-                    barter_claim_name = nearest_market['claimName'] if nearest_market else ''
+                    barter_claim_name = claim_name_param or (nearest_market['claimName'] if nearest_market else '')
 
                     for bldg in inv.get('buildings', []):
                         bname = bldg.get('buildingName', '')
@@ -257,11 +258,14 @@ class handler(BaseHTTPRequestHandler):
                                 stall_items[item_id]['qty'] += qty
 
                         if stall_items:
-                            # Distance to this claim
-                            dist_to_claim = nearest_market['distance'] if nearest_market else 0
+                            # Distance to selected claim (raw units; frontend divides by 3)
                             if barter_claim_name and barter_claim_name in claim_coords:
                                 cx, cz = claim_coords[barter_claim_name]
                                 dist_to_claim = round(distance(px, pz, cx, cz))
+                            elif nearest_market:
+                                dist_to_claim = nearest_market['distance']
+                            else:
+                                dist_to_claim = 0
                             barter_sources.append({
                                 'nickname':  nickname,
                                 'claimName': barter_claim_name,

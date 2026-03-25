@@ -35,6 +35,7 @@ const S = {
   refreshAt:     null,
   watchedStalls:   JSON.parse(localStorage.getItem('bcTasks_watched') || '[]'),
   selectedClaimId: localStorage.getItem('bcTasks_selectedClaim') || null,
+  allClaims:       [],
 };
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
@@ -165,6 +166,7 @@ async function doSearch() {
     psDetail.textContent = parts.join(' · ');
 
     if (data.allClaims?.length) {
+      S.allClaims  = data.allClaims;
       claimNameMap = {};
       data.allClaims.forEach(c => { claimNameMap[`${c.name} (${c.dist}h)`] = c.id; });
       claimList.innerHTML = data.allClaims
@@ -235,7 +237,11 @@ async function loadStalls() {
   try {
     const params = [`x=${x}`, `z=${z}`, `range=${S.stallRange * 3}`];
     if (regionId) params.push(`regionId=${regionId}`);
-    if (S.selectedClaimId) params.push(`claimId=${S.selectedClaimId}`);
+    if (S.selectedClaimId) {
+      params.push(`claimId=${S.selectedClaimId}`);
+      const selClaim = (S.allClaims || []).find(c => c.id === S.selectedClaimId);
+      if (selClaim) params.push(`claimName=${encodeURIComponent(selClaim.name)}`);
+    }
     if (S.watchedStalls.length) params.push(`watch=${encodeURIComponent(S.watchedStalls.join(','))}`);
     const data = await apiFetch(`/api/stalls?${params.join('&')}`);
     S.stalls        = data.stalls || [];
