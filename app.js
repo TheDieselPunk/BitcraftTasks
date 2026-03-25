@@ -45,7 +45,9 @@ const playerStrip   = $('player-strip');
 const psName        = $('ps-name');
 const psDetail      = $('ps-detail');
 const psMarket      = $('ps-market');
-const claimSelect   = $('claim-select');
+const claimInput    = $('claim-input');
+const claimList     = $('claim-list');
+let   claimNameMap  = {};   // name → id
 const expiryCd      = $('expiry-cd');
 const rangeSlider   = $('range-slider');
 const rangeVal      = $('range-val');
@@ -119,9 +121,11 @@ function renderWatchChips() {
 btnWatchAdd.addEventListener('click', () => { addWatch(watchInput.value); watchInput.value = ''; });
 watchInput.addEventListener('keydown', e => { if (e.key === 'Enter') { addWatch(watchInput.value); watchInput.value = ''; } });
 
-claimSelect.addEventListener('change', () => {
-  S.selectedClaimId = claimSelect.value || null;
-  localStorage.setItem('bcTasks_selectedClaim', S.selectedClaimId || '');
+claimInput.addEventListener('change', () => {
+  const id = claimNameMap[claimInput.value.trim()];
+  if (!id) return;
+  S.selectedClaimId = id;
+  localStorage.setItem('bcTasks_selectedClaim', id);
   if (S.player) load();
 });
 
@@ -161,12 +165,15 @@ async function doSearch() {
     psDetail.textContent = parts.join(' · ');
 
     if (data.allClaims?.length) {
-      claimSelect.innerHTML = data.allClaims
-        .map(c => `<option value="${esc(c.id)}">${esc(c.name)} (${c.dist}h)</option>`)
+      claimNameMap = {};
+      data.allClaims.forEach(c => { claimNameMap[`${c.name} (${c.dist}h)`] = c.id; });
+      claimList.innerHTML = data.allClaims
+        .map(c => `<option value="${esc(c.name)} (${c.dist}h)">`)
         .join('');
-      const saved = S.selectedClaimId && data.allClaims.find(c => c.id === S.selectedClaimId);
-      S.selectedClaimId = saved ? S.selectedClaimId : data.allClaims[0].id;
-      claimSelect.value = S.selectedClaimId;
+      const savedName = S.selectedClaimId && data.allClaims.find(c => c.id === S.selectedClaimId);
+      const defaultC  = savedName || data.allClaims[0];
+      S.selectedClaimId = defaultC.id;
+      claimInput.value  = `${defaultC.name} (${defaultC.dist}h)`;
       localStorage.setItem('bcTasks_selectedClaim', S.selectedClaimId);
     }
     playerStrip.classList.add('visible');
@@ -242,12 +249,6 @@ async function loadStalls() {
       ownersList.innerHTML = data.ownerNames.map(n => `<option value="${esc(n)}">`).join('');
     }
 
-    // Update stall count on selected claim option
-    const nm = data.nearestMarket;
-    if (nm && S.selectedClaimId) {
-      const opt = claimSelect.querySelector(`option[value="${S.selectedClaimId}"]`);
-      if (opt && nm.stallCount) opt.textContent += `, ${nm.stallCount} stall${nm.stallCount !== 1 ? 's' : ''}`;
-    }
 
     render();
   } catch (err) {

@@ -67,7 +67,7 @@
     #ps-name   { font-weight: 800; color: #f0a500; letter-spacing: .08em; text-transform: uppercase; }
     #ps-detail { color: #666688; }
     #ps-market { display: flex; align-items: center; gap: 6px; color: #b47cff; font-size: .75rem; }
-    #claim-select { background: #0f0f28; color: #b47cff; border: 1px solid #2a2a5a; border-radius: 4px; padding: 2px 6px; font-size: .75rem; cursor: pointer; }
+    #claim-input { background: #0f0f28; color: #b47cff; border: 1px solid #2a2a5a; border-radius: 4px; padding: 2px 6px; font-size: .75rem; width: 180px; }
     #expiry-cd { font-size: .8rem; font-weight: 700; }
     .cd-ok     { color: #5bc8e8; }
     .cd-warn   { color: #f0a500; }
@@ -228,7 +228,8 @@
     </div>
     <div id="ps-market">
       <span>⊙ Market:</span>
-      <select id="claim-select"><option value="">— loading —</option></select>
+      <input id="claim-input" type="text" placeholder="Select claim…" list="claim-list" autocomplete="off">
+      <datalist id="claim-list"></datalist>
     </div>
     <div id="expiry-cd" class="cd-ok"></div>
     <div id="range-group">
