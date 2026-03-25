@@ -80,7 +80,10 @@ def get_claims(x, z, region_id):
     try:
         params = {'regionId': region_id} if region_id else {}
         data   = api_get('/api/claims', params)
-        claims = data.get('claims', data if isinstance(data, list) else [])
+        if isinstance(data, list):
+            claims = data
+        else:
+            claims = data.get('claims') or data.get('data') or []
 
         with_dist = []
         for c in claims:
