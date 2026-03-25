@@ -123,10 +123,12 @@ btnWatchAdd.addEventListener('click', () => { addWatch(watchInput.value); watchI
 watchInput.addEventListener('keydown', e => { if (e.key === 'Enter') { addWatch(watchInput.value); watchInput.value = ''; } });
 
 claimInput.addEventListener('change', () => {
-  const id = claimNameMap[claimInput.value.trim()];
+  const val = claimInput.value.trim();
+  const id  = claimNameMap[val];
   if (!id) return;
   S.selectedClaimId = id;
   localStorage.setItem('bcTasks_selectedClaim', id);
+  localStorage.setItem('bcTasks_selectedClaimName', val);
   if (S.player) load();
 });
 
@@ -175,8 +177,10 @@ async function doSearch() {
       const savedName = S.selectedClaimId && data.allClaims.find(c => c.id === S.selectedClaimId);
       const defaultC  = savedName || data.allClaims[0];
       S.selectedClaimId = defaultC.id;
-      claimInput.value  = `${defaultC.name} (${defaultC.dist}h)`;
-      localStorage.setItem('bcTasks_selectedClaim', S.selectedClaimId);
+      const claimLabel  = `${defaultC.name} (${defaultC.dist}h)`;
+      claimInput.value  = claimLabel;
+      localStorage.setItem('bcTasks_selectedClaim',     S.selectedClaimId);
+      localStorage.setItem('bcTasks_selectedClaimName', claimLabel);
     }
     playerStrip.classList.add('visible');
     watchRow.classList.add('visible');
@@ -369,8 +373,9 @@ function decorateTask(task, stallMap) {
       const sp = hexPrice(m.price_parts);
       if (sp != null) candidates.push(sp);
     }
-    if (candidates.length) totalCost += Math.min(...candidates) * item.qty;
-    else costKnown = false;
+    const buyQty = Math.max(0, item.qty - (item.inv_have || 0));
+    if (candidates.length) totalCost += Math.min(...candidates) * buyQty;
+    else if (buyQty > 0) costKnown = false;
   }
   const hasSource = items.some(i => i.stall_matches.length > 0 || i.market_price != null);
   const cost   = costKnown && hasSource ? totalCost : null;
@@ -430,7 +435,8 @@ function renderRow(task) {
       }
       const ph        = priceHtml(m.price_parts);
       const coinPrice = hexPrice(m.price_parts);
-      const profit    = coinPrice != null ? task.reward - coinPrice * item.qty : null;
+      const buyQty    = Math.max(0, item.qty - (item.inv_have || 0));
+      const profit    = coinPrice != null ? task.reward - coinPrice * buyQty : null;
       const profitStr = profit != null
         ? ` <span class="${profit >= 0 ? 'profit-pos' : 'profit-neg'}">(${HEX}${profit.toLocaleString()})</span>`
         : '';
