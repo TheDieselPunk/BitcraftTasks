@@ -36,8 +36,8 @@ def cors_headers():
 def get_player(username):
     """
     Two-step lookup: search by username → full profile for position.
-    Returns {id, username, locationX, locationZ, regionId, claimName, claimId,
-             nearestClaimName, nearestClaimId} or None.
+    Returns {id, username, locationX, locationZ, regionId,
+             nearestClaimName, nearestClaimId, nearestClaimDist, allClaims} or None.
     """
     data    = api_get('/api/players', {'q': username, 'limit': 5})
     players = data.get('players', [])
@@ -55,51 +55,61 @@ def get_player(username):
     z         = p.get('locationZ')
     region_id = p.get('regionId')
 
-    # Find the nearest claim in the region for market lookups
-    nearest = get_nearest_claim(x, z, region_id) if x is not None else None
+    nearest, all_claims = get_claims(x, z, region_id) if x is not None else (None, [])
 
     return {
-        'id':              player_id,
-        'username':        p.get('username', username),
-        'locationX':       x,
-        'locationZ':       z,
-        'regionId':        region_id,
+        'id':               player_id,
+        'username':         p.get('username', username),
+        'locationX':        x,
+        'locationZ':        z,
+        'regionId':         region_id,
         'nearestClaimName': nearest['name']     if nearest else None,
         'nearestClaimId':   nearest['entityId'] if nearest else None,
         'nearestClaimDist': nearest['distance'] if nearest else None,
+        'allClaims':        all_claims,
     }
 
 
-def get_nearest_claim(x, z, region_id):
+def get_claims(x, z, region_id):
     """
-    Fetch all claims in the region and return the one closest to (x, z).
-    Returns {entityId, name, locationX, locationZ, distance} or None.
+    Fetch all claims in the region, sorted by distance from (x, z).
+    Returns (nearest_dict, all_claims_list).
+    nearest_dict: {entityId, name, distance} or None.
+    all_claims_list: [{id, name, dist}] in display units (raw / 3), sorted nearest-first.
     """
     try:
         params = {'regionId': region_id} if region_id else {}
         data   = api_get('/api/claims', params)
         claims = data.get('claims', data if isinstance(data, list) else [])
-        best, best_dist = None, float('inf')
+
+        with_dist = []
         for c in claims:
-            cx = c.get('locationX')
-            cz = c.get('locationZ')
-            if cx is None or cz is None:
+            cx  = c.get('locationX')
+            cz  = c.get('locationZ')
+            eid = c.get('entityId')
+            nm  = c.get('name', '')
+            if cx is None or cz is None or not eid or not nm:
                 continue
             d = distance(x, z, cx, cz)
-            if d < best_dist:
-                best_dist = d
-                best = c
-        if best:
-            return {
-                'entityId': str(best['entityId']),
-                'name':     best.get('name', ''),
-                'locationX': best.get('locationX'),
-                'locationZ': best.get('locationZ'),
-                'distance': round(best_dist),
-            }
+            with_dist.append({'_d': d, 'id': str(eid), 'name': nm, 'dist': round(d / 3)})
+
+        with_dist.sort(key=lambda c: c['_d'])
+        all_claims = [{'id': c['id'], 'name': c['name'], 'dist': c['dist']} for c in with_dist]
+
+        if not all_claims:
+            return None, []
+
+        n = all_claims[0]
+        nearest = {'entityId': n['id'], 'name': n['name'], 'distance': n['dist']}
+        return nearest, all_claims
     except Exception:
-        pass
-    return None
+        return None, []
+
+
+def get_nearest_claim(x, z, region_id):
+    """Convenience wrapper — returns just the nearest claim dict."""
+    nearest, _ = get_claims(x, z, region_id)
+    return nearest
 
 
 def build_inv_map(inv_data):
@@ -215,11 +225,11 @@ def distance(x1, z1, x2, z2):
     return math.sqrt((x2 - x1) ** 2 + (z2 - z1) ** 2)
 
 
-def get_market_price(item_id, item_type, px, pz):
+def get_market_price(item_id, item_type, claim_id):
     """
-    Fetch all sell orders for an item, filter to the nearest claim by player
-    distance, and return the lowest priceThreshold there.
-    Returns None if no sell orders found nearby.
+    Fetch all sell orders for an item and return the lowest priceThreshold
+    at the given claim (matched by claimEntityId).
+    Returns None if no sell orders exist for that claim.
     """
     endpoint = f'/api/market/{"cargo" if item_type == "cargo" else "item"}/{item_id}'
     try:
@@ -231,26 +241,14 @@ def get_market_price(item_id, item_type, px, pz):
     if not orders:
         return None
 
-    # Build map of claimEntityId → (distance, min_price)
-    claim_info = {}
-    for o in orders:
-        cid = o.get('claimEntityId')
-        cx  = o.get('claimLocationX')
-        cz  = o.get('claimLocationZ')
-        try:
-            price = int(o['priceThreshold'])
-        except (KeyError, ValueError, TypeError):
-            continue
-        if not cid:
-            continue
-        dist = distance(px, pz, float(cx), float(cz)) if (cx is not None and cz is not None) else float('inf')
-        if cid not in claim_info or dist < claim_info[cid]['dist']:
-            claim_info[cid] = {'dist': dist, 'min_price': price}
-        elif dist == claim_info[cid]['dist']:
-            claim_info[cid]['min_price'] = min(claim_info[cid]['min_price'], price)
-
-    if not claim_info:
+    claim_orders = [
+        o for o in orders
+        if str(o.get('claimEntityId', '')) == str(claim_id) and o.get('priceThreshold') is not None
+    ]
+    if not claim_orders:
         return None
 
-    nearest_cid = min(claim_info, key=lambda k: claim_info[k]['dist'])
-    return claim_info[nearest_cid]['min_price']
+    try:
+        return min(int(o['priceThreshold']) for o in claim_orders)
+    except (ValueError, TypeError):
+        return None

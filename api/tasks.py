@@ -70,11 +70,7 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         params    = parse_qs(urlparse(self.path).query)
         player_id = params.get('player_id', [''])[0].strip()
-        try:
-            px = float(params.get('x', [None])[0])
-            pz = float(params.get('z', [None])[0])
-        except (TypeError, ValueError):
-            px = pz = None
+        claim_id  = params.get('claim_id',  [''])[0].strip() or None
 
         if not player_id:
             self._send(400, {'error': 'player_id parameter is required'})
@@ -140,13 +136,13 @@ class handler(BaseHTTPRequestHandler):
                     k = f"{item['id']}|{item['type']}"
                     item['craft_info'] = seen.get(k, {'status': 'none', 'details': [], 'building': ''})
 
-            # Enrich market prices using nearest-claim sell orders
-            if px is not None and pz is not None:
+            # Enrich market prices from the selected claim
+            if claim_id:
                 unique_items = {(item['id'], item['type']) for t in tasks for item in t['items']}
                 price_map = {}
                 with ThreadPoolExecutor(max_workers=10) as pool:
                     futures = {
-                        pool.submit(get_market_price, iid, itype, px, pz): iid
+                        pool.submit(get_market_price, iid, itype, claim_id): iid
                         for iid, itype in unique_items
                     }
                     for f in as_completed(futures):

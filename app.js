@@ -33,7 +33,8 @@ const S = {
   refreshTimer:  null,
   refreshCdTimer: null,
   refreshAt:     null,
-  watchedStalls: JSON.parse(localStorage.getItem('bcTasks_watched') || '[]'),
+  watchedStalls:   JSON.parse(localStorage.getItem('bcTasks_watched') || '[]'),
+  selectedClaimId: localStorage.getItem('bcTasks_selectedClaim') || null,
 };
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
@@ -44,6 +45,7 @@ const playerStrip   = $('player-strip');
 const psName        = $('ps-name');
 const psDetail      = $('ps-detail');
 const psMarket      = $('ps-market');
+const claimSelect   = $('claim-select');
 const expiryCd      = $('expiry-cd');
 const rangeSlider   = $('range-slider');
 const rangeVal      = $('range-val');
@@ -117,6 +119,12 @@ function renderWatchChips() {
 btnWatchAdd.addEventListener('click', () => { addWatch(watchInput.value); watchInput.value = ''; });
 watchInput.addEventListener('keydown', e => { if (e.key === 'Enter') { addWatch(watchInput.value); watchInput.value = ''; } });
 
+claimSelect.addEventListener('change', () => {
+  S.selectedClaimId = claimSelect.value || null;
+  localStorage.setItem('bcTasks_selectedClaim', S.selectedClaimId || '');
+  if (S.player) load();
+});
+
 // ── Tooltip ────────────────────────────────────────────────────────────────────
 function showTip(e, html) {
   tipBox.innerHTML = html;
@@ -152,9 +160,15 @@ async function doSearch() {
     if (data.regionId)          parts.push(`Region ${data.regionId}`);
     psDetail.textContent = parts.join(' · ');
 
-    psMarket.textContent = data.nearestClaimName
-      ? `⊙ Nearest Market: ${data.nearestClaimName}${data.nearestClaimDist != null ? ` (${Math.round(data.nearestClaimDist)}h)` : ''}`
-      : '';
+    if (data.allClaims?.length) {
+      claimSelect.innerHTML = data.allClaims
+        .map(c => `<option value="${esc(c.id)}">${esc(c.name)} (${c.dist}h)</option>`)
+        .join('');
+      const saved = S.selectedClaimId && data.allClaims.find(c => c.id === S.selectedClaimId);
+      S.selectedClaimId = saved ? S.selectedClaimId : data.allClaims[0].id;
+      claimSelect.value = S.selectedClaimId;
+      localStorage.setItem('bcTasks_selectedClaim', S.selectedClaimId);
+    }
     playerStrip.classList.add('visible');
     watchRow.classList.add('visible');
     toolbar.classList.add('visible');
@@ -194,7 +208,7 @@ async function load() {
 async function loadTasks() {
   try {
     let url = `/api/tasks?player_id=${encodeURIComponent(S.player.id)}`;
-    if (S.player.locationX != null) url += `&x=${S.player.locationX}&z=${S.player.locationZ}`;
+    if (S.selectedClaimId) url += `&claim_id=${encodeURIComponent(S.selectedClaimId)}`;
     const data = await apiFetch(url);
     S.expiry      = data.expiry;
     S.tasks       = data.tasks || [];
@@ -214,7 +228,7 @@ async function loadStalls() {
   try {
     const params = [`x=${x}`, `z=${z}`, `range=${S.stallRange * 3}`];
     if (regionId) params.push(`regionId=${regionId}`);
-    if (S.player.nearestClaimId) params.push(`claimId=${S.player.nearestClaimId}`);
+    if (S.selectedClaimId) params.push(`claimId=${S.selectedClaimId}`);
     if (S.watchedStalls.length) params.push(`watch=${encodeURIComponent(S.watchedStalls.join(','))}`);
     const data = await apiFetch(`/api/stalls?${params.join('&')}`);
     S.stalls        = data.stalls || [];
@@ -228,11 +242,12 @@ async function loadStalls() {
       ownersList.innerHTML = data.ownerNames.map(n => `<option value="${esc(n)}">`).join('');
     }
 
-    // Update nearest market display
+    // Update stall count on selected claim option
     const nm = data.nearestMarket;
-    psMarket.textContent = nm
-      ? `⊙ Nearest Market: ${nm.claimName} (${Math.round(nm.distance / 3)}h, ${nm.stallCount} stall${nm.stallCount !== 1 ? 's' : ''})`
-      : '';
+    if (nm && S.selectedClaimId) {
+      const opt = claimSelect.querySelector(`option[value="${S.selectedClaimId}"]`);
+      if (opt && nm.stallCount) opt.textContent += `, ${nm.stallCount} stall${nm.stallCount !== 1 ? 's' : ''}`;
+    }
 
     render();
   } catch (err) {
