@@ -158,6 +158,7 @@ async function doSearch() {
     playerStrip.classList.add('visible');
     watchRow.classList.add('visible');
     toolbar.classList.add('visible');
+    if (Notification.permission === 'default') Notification.requestPermission();
     await load();
   } catch (err) {
     setStatus(`⚠ ${err.message}`);
@@ -494,11 +495,19 @@ function clearTimers() {
 
 function startExpiryCountdown() {
   if (!S.expiry) return;
+  let notified = false;
   const tick = () => {
     const ms = S.expiry * 1000 - Date.now();
     if (ms <= 0) {
       expiryCd.textContent = '⏰ Tasks expired';
       expiryCd.className   = 'cd-urgent';
+      if (!notified && Notification.permission === 'granted') {
+        notified = true;
+        new Notification('BitCraft Tasks', {
+          body: `${S.player?.username ?? 'Your'} traveler tasks have reset!`,
+          icon: '/favicon.ico',
+        });
+      }
       return;
     }
     const h = Math.floor(ms / 3600000);
