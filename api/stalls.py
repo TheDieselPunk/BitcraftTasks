@@ -18,7 +18,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(__file__))
 from _lib import api_get, distance, cors_headers
 
-DEFAULT_RANGE  = 1000
 INFINITE_STOCK = 2_000_000_000
 
 
@@ -99,11 +98,6 @@ class handler(BaseHTTPRequestHandler):
             self._send(400, {'error': 'x and z (player coordinates) are required'})
             return
 
-        try:
-            search_range = float(params.get('range', [DEFAULT_RANGE])[0])
-        except (TypeError, ValueError):
-            search_range = DEFAULT_RANGE
-
         region_id = params.get('regionId', [None])[0]
 
         # Watched trader names — always included regardless of range
@@ -134,38 +128,28 @@ class handler(BaseHTTPRequestHandler):
                 stalls_raw = [s for s in stalls_raw if str(s.get('regionId', '')) == str(region_id)]
 
             # Build claim → coords map from stalls that have coordinates.
-            # Used to assign a fallback position to null-coord barter stalls.
             claim_coords = {}
             for s in stalls_raw:
                 cx, cz, cn = s.get('locationX'), s.get('locationZ'), s.get('claimName')
                 if cx is not None and cz is not None and cn and cn not in claim_coords:
                     claim_coords[cn] = (float(cx), float(cz))
 
-            # Nearest claim to player (from coord stalls)
-            fallback_x, fallback_z, fallback_name = px, pz, None
-            fallback_dist = float('inf')
-            for cname, (cx, cz) in claim_coords.items():
-                d = distance(px, pz, cx, cz)
-                if d < fallback_dist:
-                    fallback_dist, fallback_x, fallback_z, fallback_name = d, cx, cz, cname
-
-            nearby         = []   # all stalls within range (for minimap)
-            all_with_dist  = []   # all stalls globally with distance, for nearest market
+            nearby        = []   # watched trader stands only
+            all_with_dist = []   # all coord stalls, for nearest market fallback
 
             for stall in stalls_raw:
+                owner = stall.get('ownerName', '') or ''
+                if not owner:
+                    continue   # skip barter stalls — covered by claim inventory API
+
                 sx = stall.get('locationX')
                 sz = stall.get('locationZ')
                 if sx is None or sz is None:
-                    # Barter stall with no coordinates — pin to nearest claim if in player's region
-                    if region_id and str(stall.get('regionId', '')) == str(region_id) and fallback_name:
-                        sx, sz = fallback_x, fallback_z
-                    else:
-                        continue
+                    continue
 
                 dist  = distance(px, pz, float(sx), float(sz))
                 items = parse_sell_items(stall, dist)
-                owner    = stall.get('ownerName', '') or ''
-                nickname = stall.get('nickname', '')  or ''
+                nickname   = stall.get('nickname', '') or ''
                 is_watched = bool(watch_names and (
                     owner.lower()    in watch_names or
                     nickname.lower() in watch_names
@@ -174,7 +158,7 @@ class handler(BaseHTTPRequestHandler):
                 entry = {
                     'name':      nickname or owner or 'Stall',
                     'owner':     owner,
-                    'claimName': stall.get('claimName') or fallback_name or '',
+                    'claimName': stall.get('claimName', ''),
                     'distance':  round(dist),
                     'x':         float(sx),
                     'z':         float(sz),
@@ -185,15 +169,8 @@ class handler(BaseHTTPRequestHandler):
                 if items:
                     all_with_dist.append(entry)
 
-                is_trader_stand = bool(owner)   # has ownerName → player-placed trader stand
-                if is_trader_stand:
-                    # Trader stands: only include if explicitly watched
-                    if is_watched:
-                        nearby.append(entry)
-                else:
-                    # Barter stalls: include if within range
-                    if dist <= search_range:
-                        nearby.append(entry)
+                if is_watched:
+                    nearby.append(entry)
 
             nearby.sort(key=lambda s: s['distance'])
             all_with_dist.sort(key=lambda s: s['distance'])

@@ -140,6 +140,11 @@
 
     /* ── Table ── */
     #tbl-wrap { overflow-x: auto; padding: 0; }
+    #exp-section { padding: 8px 20px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .exp-label   { color: #666688; font-size: .75rem; margin-right: 4px; }
+    .exp-chip    { background: #0f0f28; border: 1px solid #2a2a5a; border-radius: 12px; padding: 3px 10px; font-size: .75rem; display: inline-flex; gap: 6px; }
+    .exp-skill   { color: #b47cff; }
+    .exp-amt     { color: #5bc8e8; font-weight: 700; }
     table {
       border-collapse: collapse;
       width: 100%;
@@ -232,11 +237,6 @@
       <datalist id="claim-list"></datalist>
     </div>
     <div id="expiry-cd" class="cd-ok"></div>
-    <div id="range-group">
-      <label for="range-slider">Barter range:</label>
-      <input id="range-slider" type="range" min="50" max="250" step="25" value="100">
-      <span id="range-val">100h</span> <span class="sub" title="Distance unit used throughout this page">hexes</span>
-    </div>
   </div>
 
   <div id="watch-row">
@@ -255,6 +255,8 @@
     <span id="status"></span>
     <span id="refresh-cd"></span>
   </div>
+
+  <div id="exp-section"></div>
 
   <div id="tbl-wrap">
     <div id="empty-msg"></div>

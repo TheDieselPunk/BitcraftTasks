@@ -25,7 +25,6 @@ const S = {
   sortCol:       'profit',
   sortAsc:       false,
   filterOn:      false,
-  stallRange:    100,
   expiry:        null,
   tasksLoaded:   false,
   stallsLoaded:  false,
@@ -50,8 +49,7 @@ const claimInput    = $('claim-input');
 const claimList     = $('claim-list');
 let   claimNameMap  = {};   // name → id
 const expiryCd      = $('expiry-cd');
-const rangeSlider   = $('range-slider');
-const rangeVal      = $('range-val');
+const expSection    = $('exp-section');
 const watchRow      = $('watch-row');
 const watchInput    = $('watch-input');
 const btnWatchAdd   = $('btn-watch-add');
@@ -86,11 +84,6 @@ btnFilter.addEventListener('click', () => {
   render();
 });
 btnCsv.addEventListener('click', downloadCsv);
-rangeSlider.addEventListener('input', () => {
-  S.stallRange = +rangeSlider.value;
-  rangeVal.textContent = `${S.stallRange}h`;
-  if (S.player?.locationX != null) loadStalls();
-});
 
 // ── Watched stalls ─────────────────────────────────────────────────────────────
 function saveWatched() {
@@ -239,7 +232,7 @@ async function loadTasks() {
 async function loadStalls() {
   const { locationX: x, locationZ: z, regionId } = S.player;
   try {
-    const params = [`x=${x}`, `z=${z}`, `range=${S.stallRange * 3}`];
+    const params = [`x=${x}`, `z=${z}`];
     if (regionId) params.push(`regionId=${regionId}`);
     if (S.selectedClaimId) {
       params.push(`claimId=${S.selectedClaimId}`);
@@ -327,6 +320,23 @@ function priceHtml(price_parts) {
   }).join(' <span class="sub">+</span> ');
 }
 
+// ── EXP summary ───────────────────────────────────────────────────────────────
+function renderExpTable(tasks) {
+  const totals = {};
+  for (const t of tasks) {
+    if (!t.exp_qty || !t.exp_skill_id) continue;
+    totals[t.exp_skill_id] = (totals[t.exp_skill_id] || 0) + t.exp_qty;
+  }
+  const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+  if (!entries.length) { expSection.innerHTML = ''; return; }
+  const label = S.filterOn ? 'Completable EXP' : 'Potential EXP';
+  expSection.innerHTML =
+    `<span class="exp-label">${label}:</span>` +
+    entries.map(([sid, total]) =>
+      `<span class="exp-chip"><span class="exp-skill">Skill ${esc(sid)}</span><span class="exp-amt">${total.toLocaleString()}</span></span>`
+    ).join('');
+}
+
 // ── Render ────────────────────────────────────────────────────────────────────
 function render() {
   if (!S.tasksLoaded) return;
@@ -342,6 +352,8 @@ function render() {
     const cmp = typeof va === 'string' ? va.localeCompare(vb) : va - vb;
     return S.sortAsc ? cmp : -cmp;
   });
+
+  renderExpTable(S.filterOn ? tasks.filter(isCompletable) : tasks);
 
   if (S.filterOn) tasks = tasks.filter(isCompletable);
 
@@ -431,7 +443,7 @@ function renderRow(task) {
       const distStr   = `<span class="sub">${Math.round(m.distance / 3).toLocaleString()}h</span>`;
       if (m.isBarter) {
         const claimStr = m.claimName ? ` <span class="sub">(${esc(m.claimName)} · Barter Stall)</span>` : ` <span class="sub">(Barter Stall)</span>`;
-        return `<span class="stall-name">${esc(m.name)}</span>${claimStr} <span class="sub profit-neutral">(⬡0)</span> ${distStr}`;
+        return `<span class="stall-name">${esc(m.name)}</span>${claimStr} <span class="sub profit-neutral">(⬡?)</span> ${distStr}`;
       }
       const ph        = priceHtml(m.price_parts);
       const coinPrice = hexPrice(m.price_parts);

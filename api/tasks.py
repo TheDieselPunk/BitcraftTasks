@@ -53,10 +53,13 @@ def build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map):
         if not items:
             continue
 
+        exp      = task.get('rewardedExperience') or {}
         tasks.append({
             'traveler':    traveler,
             'description': task.get('description', ''),
             'reward':      reward,
+            'exp_qty':     exp.get('quantity', 0),
+            'exp_skill_id': str(exp.get('skill_id', '')),
             'items':       items,
         })
 
