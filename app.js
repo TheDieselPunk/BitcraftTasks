@@ -32,6 +32,7 @@ const S = {
   refreshTimer:  null,
   refreshCdTimer: null,
   refreshAt:     null,
+  notifyArmed:   false,
   watchedStalls:   JSON.parse(localStorage.getItem('bcTasks_watched') || '[]'),
   selectedClaimId: localStorage.getItem('bcTasks_selectedClaim') || null,
   allClaims:       [],
@@ -77,7 +78,7 @@ if (_savedName) usernameInput.value = _savedName;
 
 usernameInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 btnSearch.addEventListener('click', doSearch);
-btnRefresh.addEventListener('click', () => load());
+btnRefresh.addEventListener('click', () => { S.notifyArmed = true; load(); });
 btnFilter.addEventListener('click', () => {
   S.filterOn = !S.filterOn;
   btnFilter.classList.toggle('active', S.filterOn);
@@ -179,6 +180,7 @@ async function doSearch() {
     watchRow.classList.add('visible');
     toolbar.classList.add('visible');
     if (Notification.permission === 'default') Notification.requestPermission();
+    S.notifyArmed = true;   // user is actively checking in — arm the reset notification
     await load();
   } catch (err) {
     setStatus(`⚠ ${err.message}`);
@@ -537,16 +539,15 @@ function clearTimers() {
 
 function startExpiryCountdown() {
   if (!S.expiry) return;
-  let notified = false;
   const tick = () => {
     const ms = S.expiry * 1000 - Date.now();
     if (ms <= 0) {
       expiryCd.textContent = '⏰ Tasks expired';
       expiryCd.className   = 'cd-urgent';
-      if (!notified && Notification.permission === 'granted') {
-        notified = true;
-        new Notification('BitCraft Tasks', {
-          body: `${S.player?.username ?? 'Your'} traveler tasks have reset!`,
+      if (S.notifyArmed && Notification.permission === 'granted') {
+        S.notifyArmed = false;   // fire once, then wait for next user refresh
+        new Notification('BitCraft Tasks Reset', {
+          body: `${S.player?.username ?? 'Your'} traveler tasks have reset — check back in!`,
           icon: '/favicon.ico',
         });
       }
