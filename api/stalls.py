@@ -16,7 +16,7 @@ from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _lib import api_get, distance, cors_headers
+from _lib import api_get, distance, cors_headers, build_inv_map
 
 INFINITE_STOCK = 2_000_000_000
 
@@ -156,14 +156,15 @@ class handler(BaseHTTPRequestHandler):
                 items = parse_sell_items(stall, dist or 0)
 
                 entry = {
-                    'name':      nickname or owner or 'Stall',
-                    'owner':     owner,
-                    'claimName': stall.get('claimName', ''),
-                    'distance':  round(dist) if dist is not None else None,
-                    'x':         float(sx) if has_coords else None,
-                    'z':         float(sz) if has_coords else None,
-                    'items':     items,
-                    'watched':   is_watched,
+                    'name':          nickname or owner or 'Stall',
+                    'owner':         owner,
+                    'ownerEntityId': stall.get('ownerEntityId', '') or '',
+                    'claimName':     stall.get('claimName', ''),
+                    'distance':      round(dist) if dist is not None else None,
+                    'x':             float(sx) if has_coords else None,
+                    'z':             float(sz) if has_coords else None,
+                    'items':         items,
+                    'watched':       is_watched,
                 }
 
                 if items and has_coords:
@@ -174,6 +175,25 @@ class handler(BaseHTTPRequestHandler):
 
             nearby.sort(key=lambda s: (s['distance'] is None, s['distance'] or 0))
             all_with_dist.sort(key=lambda s: s['distance'])
+
+            # Cross-check watched stall items against owner's live inventory.
+            # Removes listings where the owner has 0 of the item anywhere (stale remainingStock).
+            watched_eids = {s['ownerEntityId'] for s in nearby if s.get('ownerEntityId')}
+            if watched_eids:
+                def _fetch_inv(eid):
+                    try:
+                        return eid, build_inv_map(api_get(f'/api/players/{eid}/inventories'))
+                    except Exception:
+                        return eid, {}
+
+                with ThreadPoolExecutor(max_workers=5) as pool:
+                    inv_maps = dict(pool.map(_fetch_inv, watched_eids))
+
+                for s in nearby:
+                    eid = s.get('ownerEntityId', '')
+                    if eid and eid in inv_maps:
+                        inv = inv_maps[eid]
+                        s['items'] = [it for it in s['items'] if inv.get(str(it['id']), 0) > 0]
 
             # Build nearest market: the closest claim with stalls
             nearest_market = None
