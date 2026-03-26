@@ -19,6 +19,16 @@ sys.path.insert(0, os.path.dirname(__file__))
 from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, cors_headers
 
 
+TRAVELER_SKILL = {
+    'Svim':     'Sailing',
+    'Rumbagh':  'Merchanting',
+    'Ramparte': 'Slayer',
+    'Heimlich': 'Cooking',
+    'Brico':    'Building',
+    'Alesi':    'Taming',
+}
+
+
 def build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map):
     tasks = []
     for task in tasks_data.get('tasks', []):
@@ -60,6 +70,7 @@ def build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map):
             'reward':      reward,
             'exp_qty':     exp.get('quantity', 0),
             'exp_skill_id': str(exp.get('skill_id', '')),
+            'skill_name':  TRAVELER_SKILL.get(traveler, traveler),
             'items':       items,
         })
 

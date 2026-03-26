@@ -324,16 +324,18 @@ function priceHtml(price_parts) {
 function renderExpTable(tasks) {
   const totals = {};
   for (const t of tasks) {
-    if (!t.exp_qty || !t.exp_skill_id) continue;
-    totals[t.exp_skill_id] = (totals[t.exp_skill_id] || 0) + t.exp_qty;
+    if (!t.exp_qty) continue;
+    const key = t.skill_name || t.exp_skill_id || t.traveler;
+    if (!key) continue;
+    totals[key] = (totals[key] || 0) + t.exp_qty;
   }
   const entries = Object.entries(totals).sort((a, b) => b[1] - a[1]);
   if (!entries.length) { expSection.innerHTML = ''; return; }
   const label = S.filterOn ? 'Completable EXP' : 'Potential EXP';
   expSection.innerHTML =
     `<span class="exp-label">${label}:</span>` +
-    entries.map(([sid, total]) =>
-      `<span class="exp-chip"><span class="exp-skill">Skill ${esc(sid)}</span><span class="exp-amt">${total.toLocaleString()}</span></span>`
+    entries.map(([skill, total]) =>
+      `<span class="exp-chip"><span class="exp-skill">${esc(skill)}</span><span class="exp-amt">${total.toLocaleString()}</span></span>`
     ).join('');
 }
 
@@ -440,7 +442,9 @@ function renderRow(task) {
     const matches = item.stall_matches || [];
     if (!matches.length) return `<span class="na">—</span>`;
     const lines = matches.map(m => {
-      const distStr   = `<span class="sub">${Math.round(m.distance / 3).toLocaleString()}h</span>`;
+      const distStr   = m.distance != null
+        ? `<span class="sub">${Math.round(m.distance / 3).toLocaleString()}h</span>`
+        : `<span class="sub dim">?h</span>`;
       if (m.isBarter) {
         const claimStr = m.claimName ? ` <span class="sub">(${esc(m.claimName)} · Barter Stall)</span>` : ` <span class="sub">(Barter Stall)</span>`;
         return `<span class="stall-name">${esc(m.name)}</span>${claimStr} <span class="sub profit-neutral">(⬡?)</span> ${distStr}`;

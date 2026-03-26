@@ -229,7 +229,7 @@ def get_craft_info(item_id, item_type, needed_qty, inv_map, items_map, cargo_map
         ing_id  = str(inp.get('item_id', ''))
         ing_qty = (inp.get('quantity') or 1) * runs
         have    = inv_map.get(ing_id, 0)
-        name    = items_map.get(ing_id) or cargo_map.get(ing_id) or inp.get('itemName') or inp.get('name') or ing_id
+        name    = items_map.get(ing_id) or cargo_map.get(ing_id) or inp.get('itemName') or inp.get('cargoName') or inp.get('name') or ing_id
         if have >= ing_qty:
             any_ok = True
         else:

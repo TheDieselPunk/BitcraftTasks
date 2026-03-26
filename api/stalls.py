@@ -135,44 +135,44 @@ class handler(BaseHTTPRequestHandler):
                     claim_coords[cn] = (float(cx), float(cz))
 
             nearby        = []   # watched trader stands only
-            all_with_dist = []   # all coord stalls, for nearest market fallback
+            all_with_dist = []   # all coord stalls with sell orders, for nearest market
 
             for stall in stalls_raw:
                 owner = stall.get('ownerName', '') or ''
                 if not owner:
                     continue   # skip barter stalls — covered by claim inventory API
 
-                sx = stall.get('locationX')
-                sz = stall.get('locationZ')
-                if sx is None or sz is None:
-                    continue
-
-                dist  = distance(px, pz, float(sx), float(sz))
-                items = parse_sell_items(stall, dist)
                 nickname   = stall.get('nickname', '') or ''
                 is_watched = bool(watch_names and (
                     owner.lower()    in watch_names or
                     nickname.lower() in watch_names
                 ))
 
+                sx = stall.get('locationX')
+                sz = stall.get('locationZ')
+                has_coords = sx is not None and sz is not None
+                dist = distance(px, pz, float(sx), float(sz)) if has_coords else None
+
+                items = parse_sell_items(stall, dist or 0)
+
                 entry = {
                     'name':      nickname or owner or 'Stall',
                     'owner':     owner,
                     'claimName': stall.get('claimName', ''),
-                    'distance':  round(dist),
-                    'x':         float(sx),
-                    'z':         float(sz),
+                    'distance':  round(dist) if dist is not None else None,
+                    'x':         float(sx) if has_coords else None,
+                    'z':         float(sz) if has_coords else None,
                     'items':     items,
                     'watched':   is_watched,
                 }
 
-                if items:
+                if items and has_coords:
                     all_with_dist.append(entry)
 
                 if is_watched:
                     nearby.append(entry)
 
-            nearby.sort(key=lambda s: s['distance'])
+            nearby.sort(key=lambda s: (s['distance'] is None, s['distance'] or 0))
             all_with_dist.sort(key=lambda s: s['distance'])
 
             # Build nearest market: the closest claim with stalls
@@ -211,27 +211,35 @@ class handler(BaseHTTPRequestHandler):
             if claim_id:
                 try:
                     inv = api_get(f'/api/claims/{claim_id}/inventories')
-                    items_lut  = {str(it['id']): it['name'] for it in inv.get('items',  [])}
-                    cargos_lut = {str(c['id']):  c['name']  for c in inv.get('cargos', [])}
+                    def _lut(lst):
+                        out = {}
+                        for it in (lst or []):
+                            iid = str(it.get('id') or it.get('itemId') or it.get('cargoId') or '')
+                            nm  = it.get('name') or it.get('itemName') or it.get('cargoName') or ''
+                            if iid:
+                                out[iid] = nm
+                        return out
+                    items_lut  = _lut(inv.get('items',  []))
+                    cargos_lut = _lut(inv.get('cargos', []))
                     barter_claim_name = claim_name_param or (nearest_market['claimName'] if nearest_market else '')
 
                     for bldg in inv.get('buildings', []):
-                        bname = bldg.get('buildingName', '')
+                        bname = bldg.get('buildingName', '') or ''
                         if 'barter' not in bname.lower() and 'counter' not in bname.lower():
                             continue
                         nickname = bldg.get('buildingNickname') or bname
                         stall_items = {}
                         for slot in bldg.get('inventory', []):
-                            c = slot.get('contents')
-                            if not c:
-                                continue
-                            item_id = str(c.get('item_id', ''))
-                            qty     = c.get('quantity', 0)
-                            itype   = c.get('item_type', 'item')
+                            # API may wrap in 'contents' or expose fields directly
+                            c = slot.get('contents') or slot
+                            item_id = str(c.get('itemId') or c.get('item_id') or '')
+                            qty     = c.get('quantity') or c.get('qty') or 0
+                            itype   = c.get('type') or c.get('itemType') or c.get('item_type') or 'item'
+                            iname   = c.get('itemName') or c.get('cargoName') or c.get('name') or ''
                             if item_id and qty > 0:
                                 lut = cargos_lut if itype == 'cargo' else items_lut
                                 if item_id not in stall_items:
-                                    stall_items[item_id] = {'name': lut.get(item_id, ''), 'qty': 0, 'type': itype}
+                                    stall_items[item_id] = {'name': iname or lut.get(item_id, ''), 'qty': 0, 'type': itype}
                                 stall_items[item_id]['qty'] += qty
 
                         if stall_items:
