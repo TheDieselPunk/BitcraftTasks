@@ -131,13 +131,21 @@ def get_nearest_claim(x, z, region_id):
     return nearest
 
 
-def build_inv_map(inv_data):
+def build_inv_map(inv_data, container_entity_id=None):
     """
     Build {item_id_str: total_qty} from a player inventories response.
-    Counts across all inventory bags/pockets.
+    If container_entity_id is given, only counts items in that specific
+    container (matched by entityId) — used to check a specific stall building.
+    Falls back to counting all bags if no matching container is found.
     """
+    bags = inv_data.get('inventories', [])
+    if container_entity_id:
+        cid = str(container_entity_id)
+        matched = [b for b in bags if str(b.get('entityId', '')) == cid]
+        if matched:
+            bags = matched
     totals = {}
-    for bag in inv_data.get('inventories', []):
+    for bag in bags:
         for pocket in bag.get('pockets', []):
             c = pocket.get('contents')
             if not c:

@@ -159,6 +159,7 @@ class handler(BaseHTTPRequestHandler):
                     'name':          nickname or owner or 'Stall',
                     'owner':         owner,
                     'ownerEntityId': stall.get('ownerEntityId', '') or '',
+                    'stallEntityId': stall.get('entityId', '') or '',
                     'claimName':     stall.get('claimName', ''),
                     'distance':      round(dist) if dist is not None else None,
                     'x':             float(sx) if has_coords else None,
@@ -182,17 +183,18 @@ class handler(BaseHTTPRequestHandler):
             if watched_eids:
                 def _fetch_inv(eid):
                     try:
-                        return eid, build_inv_map(api_get(f'/api/players/{eid}/inventories'))
+                        return eid, api_get(f'/api/players/{eid}/inventories')
                     except Exception:
                         return eid, {}
 
                 with ThreadPoolExecutor(max_workers=5) as pool:
-                    inv_maps = dict(pool.map(_fetch_inv, watched_eids))
+                    raw_inv_maps = dict(pool.map(_fetch_inv, watched_eids))
 
                 for s in nearby:
                     eid = s.get('ownerEntityId', '')
-                    if eid and eid in inv_maps:
-                        inv = inv_maps[eid]
+                    if eid and eid in raw_inv_maps:
+                        # Check only the specific stall container; fall back to all bags
+                        inv = build_inv_map(raw_inv_maps[eid], s.get('stallEntityId'))
                         s['items'] = [it for it in s['items'] if inv.get(str(it['id']), 0) > 0]
 
             # Build nearest market: the closest claim with stalls
