@@ -109,8 +109,10 @@ class handler(BaseHTTPRequestHandler):
 
             tasks_data = results.get('tasks', {})
             inv_data   = results.get('inv', {})
-            items_data = results.get('items', [])
-            cargo_data = results.get('cargo', [])
+            items_raw  = results.get('items', {})
+            cargo_raw  = results.get('cargo', {})
+            items_data = items_raw.get('items',  items_raw) if isinstance(items_raw, dict) else items_raw
+            cargo_data = cargo_raw.get('cargos', cargo_raw) if isinstance(cargo_raw, dict) else cargo_raw
 
             inv_map              = build_inv_map(inv_data)
             inv_detail           = build_inv_detail_map(inv_data)
