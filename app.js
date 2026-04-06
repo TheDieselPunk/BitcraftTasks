@@ -34,8 +34,11 @@ const S = {
   refreshAt:     null,
   notifyArmed:   false,
   watchedStalls:   JSON.parse(localStorage.getItem('bcTasks_watched') || '[]'),
+  housedPlayers:   JSON.parse(localStorage.getItem('bcTasks_housing') || '[]'),
   selectedClaimId: localStorage.getItem('bcTasks_selectedClaim') || null,
   allClaims:       [],
+  marketRangeH:    0,
+  housingSources:  [],
 };
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
@@ -55,6 +58,12 @@ const watchRow      = $('watch-row');
 const watchInput    = $('watch-input');
 const btnWatchAdd   = $('btn-watch-add');
 const watchChips    = $('watch-chips');
+const housingRow    = $('housing-row');
+const housingInput  = $('housing-input');
+const btnHousingAdd = $('btn-housing-add');
+const housingChips  = $('housing-chips');
+const marketRange   = $('market-range');
+const rangeVal      = $('range-val');
 const ownersList    = $('stall-owners-list');
 const toolbar       = $('toolbar');
 const btnRefresh    = $('btn-refresh');
@@ -71,6 +80,7 @@ const tipBox        = $('tip-box');
 // ── Init ──────────────────────────────────────────────────────────────────────
 buildHeader();
 renderWatchChips();
+renderHousingChips();
 
 // Restore saved player name
 const _savedName = localStorage.getItem('bcTasks_username');
@@ -116,6 +126,36 @@ function renderWatchChips() {
 btnWatchAdd.addEventListener('click', () => { addWatch(watchInput.value); watchInput.value = ''; });
 watchInput.addEventListener('keydown', e => { if (e.key === 'Enter') { addWatch(watchInput.value); watchInput.value = ''; } });
 
+// ── Housed players ─────────────────────────────────────────────────────────────
+function saveHoused() {
+  localStorage.setItem('bcTasks_housing', JSON.stringify(S.housedPlayers));
+}
+
+function addHousing(name) {
+  const n = name.trim();
+  if (!n || S.housedPlayers.includes(n)) return;
+  S.housedPlayers.push(n);
+  saveHoused();
+  renderHousingChips();
+  if (S.player?.locationX != null) loadStalls();
+}
+
+function removeHousing(name) {
+  S.housedPlayers = S.housedPlayers.filter(n => n !== name);
+  saveHoused();
+  renderHousingChips();
+  if (S.player?.locationX != null) loadStalls();
+}
+
+function renderHousingChips() {
+  housingChips.innerHTML = S.housedPlayers.map(n =>
+    `<span class="housing-chip">${esc(n)}<button onclick='removeHousing(${JSON.stringify(n)})' title="Remove">×</button></span>`
+  ).join('');
+}
+
+btnHousingAdd.addEventListener('click', () => { addHousing(housingInput.value); housingInput.value = ''; });
+housingInput.addEventListener('keydown', e => { if (e.key === 'Enter') { addHousing(housingInput.value); housingInput.value = ''; } });
+
 claimInput.addEventListener('change', () => {
   const val = claimInput.value.trim();
   const id  = claimNameMap[val];
@@ -124,6 +164,15 @@ claimInput.addEventListener('change', () => {
   localStorage.setItem('bcTasks_selectedClaim', id);
   localStorage.setItem('bcTasks_selectedClaimName', val);
   if (S.player) load();
+});
+
+// ── Market range slider ────────────────────────────────────────────────────────
+let _rangeDebounce = null;
+marketRange.addEventListener('input', () => {
+  S.marketRangeH = parseInt(marketRange.value, 10);
+  rangeVal.textContent = S.marketRangeH === 0 ? '0h' : `${S.marketRangeH}h`;
+  clearTimeout(_rangeDebounce);
+  _rangeDebounce = setTimeout(() => { if (S.player) loadTasks(); }, 600);
 });
 
 // ── Tooltip ────────────────────────────────────────────────────────────────────
@@ -178,6 +227,7 @@ async function doSearch() {
     }
     playerStrip.classList.add('visible');
     watchRow.classList.add('visible');
+    housingRow.classList.add('visible');
     toolbar.classList.add('visible');
     if (Notification.permission === 'default') Notification.requestPermission();
     S.notifyArmed = true;   // user is actively checking in — arm the reset notification
@@ -194,11 +244,12 @@ async function load() {
   if (!S.player) return;
   S.tasksLoaded  = false;
   S.stallsLoaded = false;
-  S.tasks        = [];
-  S.stalls        = [];
-  S.barterSources = [];
-  S.marketMap     = {};
-  S.marketClaim   = null;
+  S.tasks          = [];
+  S.stalls         = [];
+  S.barterSources  = [];
+  S.housingSources = [];
+  S.marketMap      = {};
+  S.marketClaim    = null;
   clearTimers();
   setStatus('Loading…');
   emptyMsg.textContent = '';
@@ -213,10 +264,31 @@ async function load() {
   setStatus('');
 }
 
+function getClaimsInRange(rangeH) {
+  if (!S.selectedClaimId || !S.allClaims.length) return null;
+  const sel = S.allClaims.find(c => c.id === S.selectedClaimId);
+  if (!sel || sel.x == null || sel.z == null) return null;
+  return S.allClaims.filter(c => {
+    if (c.x == null || c.z == null) return false;
+    const dx = c.x - sel.x, dz = c.z - sel.z;
+    return Math.sqrt(dx * dx + dz * dz) / 3 <= rangeH;
+  });
+}
+
 async function loadTasks() {
   try {
     let url = `/api/tasks?player_id=${encodeURIComponent(S.player.id)}`;
-    if (S.selectedClaimId) url += `&claim_id=${encodeURIComponent(S.selectedClaimId)}`;
+    if (S.marketRangeH > 0) {
+      const inRange = getClaimsInRange(S.marketRangeH);
+      if (inRange && inRange.length) {
+        const pairs = inRange.map(c => encodeURIComponent(c.id + ':' + c.name));
+        url += `&market_claims=${pairs.join(',')}`;
+      } else if (S.selectedClaimId) {
+        url += `&claim_id=${encodeURIComponent(S.selectedClaimId)}`;
+      }
+    } else if (S.selectedClaimId) {
+      url += `&claim_id=${encodeURIComponent(S.selectedClaimId)}`;
+    }
     const data = await apiFetch(url);
     S.expiry      = data.expiry;
     S.tasks       = data.tasks || [];
@@ -241,10 +313,12 @@ async function loadStalls() {
       const selClaim = (S.allClaims || []).find(c => c.id === S.selectedClaimId);
       if (selClaim) params.push(`claimName=${encodeURIComponent(selClaim.name)}`);
     }
-    if (S.watchedStalls.length) params.push(`watch=${encodeURIComponent(S.watchedStalls.join(','))}`);
+    if (S.watchedStalls.length)  params.push(`watch=${encodeURIComponent(S.watchedStalls.join(','))}`);
+    if (S.housedPlayers.length)  params.push(`housing=${encodeURIComponent(S.housedPlayers.join(','))}`);
     const data = await apiFetch(`/api/stalls?${params.join('&')}`);
-    S.stalls        = data.stalls || [];
-    S.barterSources = data.barterSources || [];
+    S.stalls         = data.stalls || [];
+    S.barterSources  = data.barterSources || [];
+    S.housingSources = data.housingSources || [];
     S.marketMap     = data.nearestMarket?.items  || {};
     S.marketClaim   = data.nearestMarket || null;
     S.stallsLoaded  = true;
@@ -298,9 +372,35 @@ function buildStallMap() {
       });
     }
   }
+  // Add housing sources
+  for (const hs of S.housingSources) {
+    for (const storage of hs.storages) {
+      for (const [itemId, qty] of Object.entries(storage.items)) {
+        if (!map[itemId]) map[itemId] = [];
+        map[itemId].push({
+          name:         `${hs.playerName}'s House`,
+          storageLabel: storage.label,
+          owner:        hs.playerName,
+          claimName:    '',
+          distance:     null,
+          watched:      false,
+          isBarter:     false,
+          isHousing:    true,
+          qty:          qty,
+          stock:        qty,
+          price_parts:  [],
+        });
+      }
+    }
+  }
+
   for (const k of Object.keys(map)) map[k].sort((a, b) => {
     if (a.watched !== b.watched) return a.watched ? -1 : 1;
-    if (a.isBarter !== b.isBarter) return a.isBarter ? 1 : -1;
+    if (a.isHousing !== b.isHousing) return a.isHousing ? 1 : -1;
+    if (a.isBarter  !== b.isBarter)  return a.isBarter  ? 1 : -1;
+    if (a.distance == null && b.distance == null) return 0;
+    if (a.distance == null) return 1;
+    if (b.distance == null) return -1;
     return a.distance - b.distance;
   });
   return map;
@@ -444,6 +544,9 @@ function renderRow(task) {
     const matches = item.stall_matches || [];
     if (!matches.length) return `<span class="na">—</span>`;
     const lines = matches.map(m => {
+      if (m.isHousing) {
+        return `<span class="housing-name">${esc(m.name)}</span> <span class="sub">(${esc(m.storageLabel)})</span>`;
+      }
       const distStr   = m.distance != null
         ? `<span class="sub">${Math.round(m.distance / 3).toLocaleString()}h</span>`
         : `<span class="sub dim">?h</span>`;
@@ -465,9 +568,26 @@ function renderRow(task) {
     return lines.join('<br>');
   }).join('<br>');
 
-  // Market price column — lowest sell at nearest claim (from /api/market/item or /api/market/cargo)
+  // Market price column
   const marketHtml = task.items.map(item => {
     if (!S.tasksLoaded) return '<span class="dim">⏳</span>';
+    const prices = item.market_prices;
+    if (prices && prices.length > 0) {
+      if (S.marketRangeH > 0) {
+        // Multi-claim: show each price with claim name, sorted ascending
+        return prices.map(mp => {
+          const unit  = mp.price.toLocaleString();
+          const total = (mp.price * item.qty).toLocaleString();
+          const claim = mp.claimName ? ` <span class="sub">(${esc(mp.claimName)})</span>` : '';
+          return `<span class="market-price">${HEX}${unit}</span>${claim} <span class="sub">(${HEX}${total})</span>`;
+        }).join('<br>');
+      } else {
+        const mp    = prices[0];
+        const unit  = mp.price.toLocaleString();
+        const total = (mp.price * item.qty).toLocaleString();
+        return `<span class="market-price">${HEX}${unit}</span> <span class="sub">(${HEX}${total})</span>`;
+      }
+    }
     if (item.market_price == null) return `<span class="dim">not listed</span>`;
     const unit  = item.market_price.toLocaleString();
     const total = (item.market_price * item.qty).toLocaleString();

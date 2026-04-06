@@ -33,6 +33,9 @@ def parse_sell_items(stall, dist):
         return float('inf')
 
     def _upsert(item_id, name, offer_qty, stock, price_parts):
+        # Skip trades where Hex Coin price is 0 (⬡0/u = not accessible to player)
+        if _coin_price(price_parts) == 0:
+            return
         entry = {
             'id':          item_id,
             'name':        name,
@@ -103,6 +106,10 @@ class handler(BaseHTTPRequestHandler):
         # Watched trader names — always included regardless of range
         watch_raw  = params.get('watch', [''])[0]
         watch_names = {n.strip().lower() for n in watch_raw.split(',') if n.strip()}
+
+        # Housing player names — inventories to include as item sources
+        housing_raw   = params.get('housing', [''])[0]
+        housing_names = [n.strip() for n in housing_raw.split(',') if n.strip()]
 
         try:
             PAGE_SIZE = 100
@@ -289,12 +296,58 @@ class handler(BaseHTTPRequestHandler):
                 if s.get('ownerName') or s.get('nickname')
             })
 
+            # Fetch housing player inventories
+            housing_sources = []
+            if housing_names:
+                def _fetch_housing_inv(player_name):
+                    try:
+                        search_data = api_get('/api/players', {'q': player_name, 'limit': 5})
+                        players_list = search_data.get('players', [])
+                        match = next(
+                            (p for p in players_list if p.get('username', '').lower() == player_name.lower()),
+                            None
+                        )
+                        if not match and players_list:
+                            match = players_list[0]
+                        if not match:
+                            return None
+                        eid = str(match['entityId'])
+                        inv = api_get(f'/api/players/{eid}/inventories')
+                        storages = []
+                        for bag in inv.get('inventories', []):
+                            claim = bag.get('claimName') or ''
+                            if not claim:
+                                continue  # skip on-character items; only include placed storage
+                            raw_name = bag.get('buildingName') or bag.get('inventoryName') or 'Storage'
+                            label = f"{raw_name} @ {claim}"
+                            items = {}
+                            for pocket in bag.get('pockets', []):
+                                c = pocket.get('contents')
+                                if not c:
+                                    continue
+                                iid = str(c.get('itemId', ''))
+                                qty = c.get('quantity', 0)
+                                if iid and qty > 0:
+                                    items[iid] = items.get(iid, 0) + qty
+                            if items:
+                                storages.append({'label': label, 'items': items})
+                        if storages:
+                            return {'playerName': player_name, 'storages': storages}
+                        return None
+                    except Exception:
+                        return None
+
+                with ThreadPoolExecutor(max_workers=5) as pool:
+                    housing_results = list(pool.map(_fetch_housing_inv, housing_names))
+                housing_sources = [r for r in housing_results if r]
+
             self._send(200, {
-                'stalls':        nearby,
-                'count':         len(nearby),
-                'nearestMarket': nearest_market,
-                'ownerNames':    owner_names,
-                'barterSources': barter_sources,
+                'stalls':         nearby,
+                'count':          len(nearby),
+                'nearestMarket':  nearest_market,
+                'ownerNames':     owner_names,
+                'barterSources':  barter_sources,
+                'housingSources': housing_sources,
             })
 
         except Exception as e:

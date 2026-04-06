@@ -16,7 +16,8 @@ from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, cors_headers
+import urllib.parse
+from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, get_market_prices_for_claims, cors_headers
 
 
 TRAVELER_SKILL = {
@@ -86,6 +87,20 @@ class handler(BaseHTTPRequestHandler):
         player_id = params.get('player_id', [''])[0].strip()
         claim_id  = params.get('claim_id',  [''])[0].strip() or None
 
+        # market_claims: comma-separated "claimId:claimName" pairs (URL-encoded per pair)
+        # When provided, replaces single claim_id for market price lookups
+        market_claims_raw = params.get('market_claims', [''])[0]
+        market_claims = {}  # {claim_id: claim_name}
+        if market_claims_raw:
+            for encoded_part in market_claims_raw.split(','):
+                part = urllib.parse.unquote(encoded_part).strip()
+                if ':' in part:
+                    cid, cname = part.split(':', 1)
+                    market_claims[cid.strip()] = cname.strip()
+        # Fall back to single claim_id with empty name
+        if not market_claims and claim_id:
+            market_claims = {claim_id: ''}
+
         if not player_id:
             self._send(400, {'error': 'player_id parameter is required'})
             return
@@ -152,24 +167,27 @@ class handler(BaseHTTPRequestHandler):
                     k = f"{item['id']}|{item['type']}"
                     item['craft_info'] = seen.get(k, {'status': 'none', 'details': [], 'building': ''})
 
-            # Enrich market prices from the selected claim
-            if claim_id:
+            # Enrich market prices from selected claim(s)
+            if market_claims:
                 unique_items = {(item['id'], item['type']) for t in tasks for item in t['items']}
                 price_map = {}
                 with ThreadPoolExecutor(max_workers=10) as pool:
                     futures = {
-                        pool.submit(get_market_price, iid, itype, claim_id): iid
+                        pool.submit(get_market_prices_for_claims, iid, itype, market_claims): iid
                         for iid, itype in unique_items
                     }
                     for f in as_completed(futures):
                         iid = futures[f]
                         try:
-                            price_map[iid] = f.result()
+                            price_map[iid] = f.result()  # [{claimId, claimName, price}] sorted asc
                         except Exception:
-                            price_map[iid] = None
+                            price_map[iid] = []
                 for t in tasks:
                     for item in t['items']:
-                        item['market_price'] = price_map.get(item['id'])
+                        prices = price_map.get(item['id'], [])
+                        item['market_prices'] = prices
+                        # market_price = lowest for backward-compat cost calculation
+                        item['market_price'] = prices[0]['price'] if prices else None
 
             self._send(200, {
                 'tasks':  tasks,

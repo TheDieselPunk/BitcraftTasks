@@ -110,10 +110,10 @@ def get_claims(x, z, region_id):
             if cx is None or cz is None or not eid or not nm:
                 continue
             d = distance(x, z, cx, cz)
-            with_dist.append({'_d': d, 'id': str(eid), 'name': nm, 'dist': round(d / 3)})
+            with_dist.append({'_d': d, 'id': str(eid), 'name': nm, 'dist': round(d / 3), 'x': float(cx), 'z': float(cz)})
 
         with_dist.sort(key=lambda c: c['_d'])
-        all_claims = [{'id': c['id'], 'name': c['name'], 'dist': c['dist']} for c in with_dist]
+        all_claims = [{'id': c['id'], 'name': c['name'], 'dist': c['dist'], 'x': c['x'], 'z': c['z']} for c in with_dist]
 
         if not all_claims:
             return None, []
@@ -279,3 +279,43 @@ def get_market_price(item_id, item_type, claim_id):
         return min(int(o['priceThreshold']) for o in claim_orders)
     except (ValueError, TypeError):
         return None
+
+
+def get_market_prices_for_claims(item_id, item_type, claim_map):
+    """
+    Fetch all sell orders for an item and return per-claim prices.
+    claim_map: {claim_id: claim_name}
+    Returns a list of {claimId, claimName, price} sorted ascending by price.
+    """
+    endpoint = f'/api/market/{"cargo" if item_type == "cargo" else "item"}/{item_id}'
+    try:
+        d = api_get(endpoint)
+    except Exception:
+        return []
+
+    orders = d.get('sellOrders', [])
+    if not orders:
+        return []
+
+    # Collect lowest price per claim
+    best = {}
+    for o in orders:
+        cid = str(o.get('claimEntityId', ''))
+        if cid not in claim_map:
+            continue
+        pt = o.get('priceThreshold')
+        if pt is None:
+            continue
+        try:
+            price = int(pt)
+        except (ValueError, TypeError):
+            continue
+        if cid not in best or price < best[cid]:
+            best[cid] = price
+
+    result = [
+        {'claimId': cid, 'claimName': claim_map[cid], 'price': price}
+        for cid, price in best.items()
+    ]
+    result.sort(key=lambda x: x['price'])
+    return result
