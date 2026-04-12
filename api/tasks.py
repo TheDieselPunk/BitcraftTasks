@@ -185,9 +185,11 @@ class handler(BaseHTTPRequestHandler):
                 for t in tasks:
                     for item in t['items']:
                         prices = price_map.get(item['id'], [])
-                        item['market_prices'] = prices
+                        # Only include claims with enough stock to fulfill this item's qty
+                        sufficient = [p for p in prices if p.get('available', 0) >= item['qty']]
+                        item['market_prices'] = sufficient
                         # market_price = lowest for backward-compat cost calculation
-                        item['market_price'] = prices[0]['price'] if prices else None
+                        item['market_price'] = sufficient[0]['price'] if sufficient else None
 
             self._send(200, {
                 'tasks':  tasks,

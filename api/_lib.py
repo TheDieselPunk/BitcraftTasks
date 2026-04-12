@@ -252,70 +252,73 @@ def distance(x1, z1, x2, z2):
     return math.sqrt((x2 - x1) ** 2 + (z2 - z1) ** 2)
 
 
-def get_market_price(item_id, item_type, claim_id):
+def get_market_price(item_id, item_type, claim_id, needed_qty=1):
     """
-    Fetch all sell orders for an item and return the lowest priceThreshold
-    at the given claim (matched by claimEntityId).
-    Returns None if no sell orders exist for that claim.
-    """
-    endpoint = f'/api/market/{"cargo" if item_type == "cargo" else "item"}/{item_id}'
-    try:
-        d = api_get(endpoint)
-    except Exception:
-        return None
-
-    orders = d.get('sellOrders', [])
-    if not orders:
-        return None
-
-    claim_orders = [
-        o for o in orders
-        if str(o.get('claimEntityId', '')) == str(claim_id) and o.get('priceThreshold') is not None
-    ]
-    if not claim_orders:
-        return None
-
-    try:
-        return min(int(o['priceThreshold']) for o in claim_orders)
-    except (ValueError, TypeError):
-        return None
-
-
-def get_market_prices_for_claims(item_id, item_type, claim_map):
-    """
-    Fetch all sell orders for an item and return per-claim prices.
-    claim_map: {claim_id: claim_name}
-    Returns a list of {claimId, claimName, price} sorted ascending by price.
+    Fetch sell orders for an item at a specific claim.
+    Returns the lowest priceThreshold, or None if the claim doesn't have
+    enough quantity (totalAvailableSell < needed_qty) or no orders exist.
     """
     endpoint = f'/api/market/{"cargo" if item_type == "cargo" else "item"}/{item_id}'
     try:
-        d = api_get(endpoint)
+        d = api_get(endpoint, {'claimEntityId': claim_id})
     except Exception:
-        return []
+        return None
+
+    if d.get('totalAvailableSell', 0) < needed_qty:
+        return None
 
     orders = d.get('sellOrders', [])
-    if not orders:
-        return []
-
-    # Collect lowest price per claim
-    best = {}
+    prices = []
     for o in orders:
-        cid = str(o.get('claimEntityId', ''))
-        if cid not in claim_map:
-            continue
         pt = o.get('priceThreshold')
         if pt is None:
             continue
         try:
-            price = int(pt)
+            prices.append(int(pt))
         except (ValueError, TypeError):
             continue
-        if cid not in best or price < best[cid]:
-            best[cid] = price
+    return min(prices) if prices else None
 
-    result = [
-        {'claimId': cid, 'claimName': claim_map[cid], 'price': price}
-        for cid, price in best.items()
-    ]
-    result.sort(key=lambda x: x['price'])
-    return result
+
+def get_market_prices_for_claims(item_id, item_type, claim_map):
+    """
+    Fetch sell availability for an item at each claim in claim_map.
+    Queries each claim individually (claimEntityId param) to get totalAvailableSell.
+    claim_map: {claim_id: claim_name}
+    Returns a list of {claimId, claimName, price, available} sorted ascending by price.
+    The caller is responsible for filtering by the item's required quantity.
+    """
+    endpoint = f'/api/market/{"cargo" if item_type == "cargo" else "item"}/{item_id}'
+
+    def _fetch_claim(cid, cname):
+        try:
+            d = api_get(endpoint, {'claimEntityId': cid})
+        except Exception:
+            return None
+        orders = d.get('sellOrders', [])
+        if not orders:
+            return None
+        available = d.get('totalAvailableSell', 0)
+        prices = []
+        for o in orders:
+            pt = o.get('priceThreshold')
+            if pt is None:
+                continue
+            try:
+                prices.append(int(pt))
+            except (ValueError, TypeError):
+                continue
+        if not prices:
+            return None
+        return {'claimId': cid, 'claimName': cname, 'price': min(prices), 'available': available}
+
+    results = []
+    with ThreadPoolExecutor(max_workers=len(claim_map)) as pool:
+        futures = {pool.submit(_fetch_claim, cid, cname): cid for cid, cname in claim_map.items()}
+        for f in as_completed(futures):
+            r = f.result()
+            if r:
+                results.append(r)
+
+    results.sort(key=lambda x: x['price'])
+    return results
