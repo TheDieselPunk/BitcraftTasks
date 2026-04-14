@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(__file__))
 import urllib.parse
-from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, get_market_prices_for_claims, cors_headers
+from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, get_market_prices_for_claims, get_player_housing_items, cors_headers
 
 
 TRAVELER_SKILL = {
@@ -108,12 +108,13 @@ class handler(BaseHTTPRequestHandler):
         try:
             # Fetch all data in parallel
             results = {}
-            with ThreadPoolExecutor(max_workers=5) as pool:
+            with ThreadPoolExecutor(max_workers=6) as pool:
                 futures = {
                     pool.submit(api_get, f'/api/players/{player_id}/traveler-tasks'): 'tasks',
                     pool.submit(api_get, f'/api/players/{player_id}/inventories'):    'inv',
                     pool.submit(api_get, '/api/items'):                               'items',
                     pool.submit(api_get, '/api/cargo'):                               'cargo',
+                    pool.submit(get_player_housing_items, player_id):                 'housing',
                 }
                 for f in as_completed(futures):
                     key = futures[f]
@@ -122,16 +123,23 @@ class handler(BaseHTTPRequestHandler):
                     except Exception:
                         results[key] = {} if key in ('tasks', 'inv') else []
 
-            tasks_data = results.get('tasks', {})
-            inv_data   = results.get('inv', {})
-            items_raw  = results.get('items', {})
-            cargo_raw  = results.get('cargo', {})
+            tasks_data   = results.get('tasks', {})
+            inv_data     = results.get('inv', {})
+            items_raw    = results.get('items', {})
+            cargo_raw    = results.get('cargo', {})
+            housing_items = results.get('housing', []) or []
             items_data = items_raw.get('items',  items_raw) if isinstance(items_raw, dict) else items_raw
             cargo_data = cargo_raw.get('cargos', cargo_raw) if isinstance(cargo_raw, dict) else cargo_raw
 
             inv_map              = build_inv_map(inv_data)
             inv_detail           = build_inv_detail_map(inv_data)
             items_map, cargo_map = build_name_maps(items_data, cargo_data)
+
+            # Merge housing storage into inv_map and inv_detail
+            for storage in housing_items:
+                for iid, qty in storage['items'].items():
+                    inv_map[iid] = inv_map.get(iid, 0) + qty
+                    inv_detail.setdefault(iid, []).append({'qty': qty, 'label': storage['label']})
 
             tasks = build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map)
 

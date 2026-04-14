@@ -131,6 +131,55 @@ def get_nearest_claim(x, z, region_id):
     return nearest
 
 
+def get_player_housing_items(player_id):
+    """
+    Fetch all housing storage for a player.
+    Calls /api/players/{id}/housing to list houses, then fetches each
+    /api/players/{id}/housing/{houseId} in parallel for inventory contents.
+    Returns list of {label, items: {item_id_str: qty}}.
+    """
+    try:
+        houses = api_get(f'/api/players/{player_id}/housing')
+    except Exception:
+        return []
+    if not isinstance(houses, list) or not houses:
+        return []
+
+    def _fetch_house(house):
+        house_id = house.get('buildingEntityId')
+        if not house_id:
+            return []
+        try:
+            detail = api_get(f'/api/players/{player_id}/housing/{house_id}')
+        except Exception:
+            return []
+        claim_name = detail.get('claimName', '')
+        results = []
+        for inv in detail.get('inventories', []):
+            b_name   = inv.get('buildingName') or 'Storage'
+            nickname = inv.get('buildingNickname') or ''
+            name_part = f"{b_name} ({nickname})" if nickname else b_name
+            label     = f"{name_part} @ {claim_name}" if claim_name else name_part
+            items = {}
+            for slot in inv.get('inventory', []):
+                c = slot.get('contents')
+                if not c:
+                    continue
+                iid = str(c.get('item_id', ''))
+                qty = c.get('quantity', 0)
+                if iid and qty > 0:
+                    items[iid] = items.get(iid, 0) + qty
+            if items:
+                results.append({'label': label, 'items': items})
+        return results
+
+    all_storages = []
+    with ThreadPoolExecutor(max_workers=len(houses)) as pool:
+        for storages in pool.map(_fetch_house, houses):
+            all_storages.extend(storages)
+    return all_storages
+
+
 def build_inv_map(inv_data, container_entity_id=None):
     """
     Build {item_id_str: total_qty} from a player inventories response.

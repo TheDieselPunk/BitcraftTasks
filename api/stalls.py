@@ -16,7 +16,7 @@ from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _lib import api_get, distance, cors_headers, build_inv_map
+from _lib import api_get, distance, cors_headers, build_inv_map, get_player_housing_items
 
 INFINITE_STOCK = 2_000_000_000
 
@@ -331,6 +331,10 @@ class handler(BaseHTTPRequestHandler):
                                     items[iid] = items.get(iid, 0) + qty
                             if items:
                                 storages.append({'label': label, 'items': items})
+                        # Also include housing storage
+                        for hs in get_player_housing_items(eid):
+                            storages.append(hs)
+
                         if storages:
                             return {'playerName': player_name, 'storages': storages}
                         return None
