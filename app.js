@@ -1,7 +1,6 @@
 'use strict';
 
 const HEX = '⬡';
-const REFRESH_MS = 5 * 60 * 1000;
 
 const COLS = [
   { label: 'Traveler',         sort: 'traveler' },
@@ -29,9 +28,6 @@ const S = {
   tasksLoaded:   false,
   stallsLoaded:  false,
   expiryTimer:   null,
-  refreshTimer:  null,
-  refreshCdTimer: null,
-  refreshAt:     null,
   notifyArmed:   false,
   watchedStalls:   JSON.parse(localStorage.getItem('bcTasks_watched') || '[]'),
   housedPlayers:   JSON.parse(localStorage.getItem('bcTasks_housing') || '[]'),
@@ -70,7 +66,6 @@ const btnRefresh    = $('btn-refresh');
 const btnFilter     = $('btn-filter');
 const btnCsv        = $('btn-csv');
 const statusEl      = $('status');
-const refreshCdEl   = $('refresh-cd');
 const tblHead       = $('tbl-head');
 const tblBody       = $('tbl-body');
 const mainTbl       = $('main-tbl');
@@ -260,7 +255,6 @@ async function load() {
     S.player.locationX != null ? loadStalls() : Promise.resolve(),
   ]);
 
-  scheduleRefresh();
   setStatus('');
 }
 
@@ -652,9 +646,7 @@ function buildHeader() {
 // ── Timers ────────────────────────────────────────────────────────────────────
 function clearTimers() {
   clearInterval(S.expiryTimer);
-  clearTimeout(S.refreshTimer);
-  clearInterval(S.refreshCdTimer);
-  S.expiryTimer = S.refreshTimer = S.refreshCdTimer = null;
+  S.expiryTimer = null;
 }
 
 function startExpiryCountdown() {
@@ -682,21 +674,6 @@ function startExpiryCountdown() {
   clearInterval(S.expiryTimer);
   tick();
   S.expiryTimer = setInterval(tick, 1000);
-}
-
-function scheduleRefresh() {
-  S.refreshAt    = Date.now() + REFRESH_MS;
-  S.refreshTimer = setTimeout(() => load(), REFRESH_MS);
-  const tick = () => {
-    if (!S.refreshAt) return;
-    const ms = S.refreshAt - Date.now();
-    if (ms <= 0) { refreshCdEl.textContent = ''; return; }
-    const m  = Math.floor(ms / 60000);
-    const sc = Math.floor((ms % 60000) / 1000);
-    refreshCdEl.textContent = `↺ ${m}:${String(sc).padStart(2,'0')}`;
-  };
-  tick();
-  S.refreshCdTimer = setInterval(tick, 1000);
 }
 
 // ── Data-tip hover ────────────────────────────────────────────────────────────

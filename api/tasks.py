@@ -185,8 +185,8 @@ class handler(BaseHTTPRequestHandler):
                 for t in tasks:
                     for item in t['items']:
                         prices = price_map.get(item['id'], [])
-                        # Only include claims with enough stock to fulfill this item's qty
-                        sufficient = [p for p in prices if p.get('available', 0) >= item['qty']]
+                        # Filter by available qty; None means quantity not reported — treat as sufficient
+                        sufficient = [p for p in prices if p.get('available') is None or p.get('available', 0) >= item['qty']]
                         item['market_prices'] = sufficient
                         # market_price = lowest for backward-compat cost calculation
                         item['market_price'] = sufficient[0]['price'] if sufficient else None

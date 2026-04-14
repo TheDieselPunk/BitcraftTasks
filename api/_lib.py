@@ -264,7 +264,7 @@ def get_market_price(item_id, item_type, claim_id, needed_qty=1):
     except Exception:
         return None
 
-    if d.get('totalAvailableSell', 0) < needed_qty:
+    if d.get('stats', {}).get('totalAvailableSell', 0) < needed_qty:
         return None
 
     orders = d.get('sellOrders', [])
@@ -282,43 +282,51 @@ def get_market_price(item_id, item_type, claim_id, needed_qty=1):
 
 def get_market_prices_for_claims(item_id, item_type, claim_map):
     """
-    Fetch sell availability for an item at each claim in claim_map.
-    Queries each claim individually (claimEntityId param) to get totalAvailableSell.
+    Fetch all sell orders for an item and return per-claim prices and availability.
     claim_map: {claim_id: claim_name}
     Returns a list of {claimId, claimName, price, available} sorted ascending by price.
-    The caller is responsible for filtering by the item's required quantity.
+    available is the sum of order quantities for that claim, or None if not reported.
     """
     endpoint = f'/api/market/{"cargo" if item_type == "cargo" else "item"}/{item_id}'
+    try:
+        d = api_get(endpoint)
+    except Exception:
+        return []
 
-    def _fetch_claim(cid, cname):
+    orders = d.get('sellOrders', [])
+    if not orders:
+        return []
+
+    best_price = {}
+    total_qty = {}
+    for o in orders:
+        cid = str(o.get('claimEntityId', ''))
+        if cid not in claim_map:
+            continue
+        pt = o.get('priceThreshold')
+        if pt is None:
+            continue
         try:
-            d = api_get(endpoint, {'claimEntityId': cid})
-        except Exception:
-            return None
-        orders = d.get('sellOrders', [])
-        if not orders:
-            return None
-        available = d.get('totalAvailableSell', 0)
-        prices = []
-        for o in orders:
-            pt = o.get('priceThreshold')
-            if pt is None:
-                continue
+            price = int(pt)
+        except (ValueError, TypeError):
+            continue
+        if cid not in best_price or price < best_price[cid]:
+            best_price[cid] = price
+        qty = o.get('quantity')
+        if qty is not None:
             try:
-                prices.append(int(pt))
+                total_qty[cid] = total_qty.get(cid, 0) + int(qty)
             except (ValueError, TypeError):
-                continue
-        if not prices:
-            return None
-        return {'claimId': cid, 'claimName': cname, 'price': min(prices), 'available': available}
+                pass
 
-    results = []
-    with ThreadPoolExecutor(max_workers=len(claim_map)) as pool:
-        futures = {pool.submit(_fetch_claim, cid, cname): cid for cid, cname in claim_map.items()}
-        for f in as_completed(futures):
-            r = f.result()
-            if r:
-                results.append(r)
-
-    results.sort(key=lambda x: x['price'])
-    return results
+    result = [
+        {
+            'claimId':   cid,
+            'claimName': claim_map[cid],
+            'price':     price,
+            'available': total_qty.get(cid),  # None if order quantity not reported
+        }
+        for cid, price in best_price.items()
+    ]
+    result.sort(key=lambda x: x['price'])
+    return result
