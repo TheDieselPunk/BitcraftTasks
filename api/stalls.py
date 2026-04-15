@@ -312,29 +312,7 @@ class handler(BaseHTTPRequestHandler):
                         if not match:
                             return None
                         eid = str(match['entityId'])
-                        inv = api_get(f'/api/players/{eid}/inventories')
-                        storages = []
-                        for bag in inv.get('inventories', []):
-                            claim = bag.get('claimName') or ''
-                            if not claim:
-                                continue  # skip on-character items; only include placed storage
-                            raw_name = bag.get('buildingName') or bag.get('inventoryName') or 'Storage'
-                            label = f"{raw_name} @ {claim}"
-                            items = {}
-                            for pocket in bag.get('pockets', []):
-                                c = pocket.get('contents')
-                                if not c:
-                                    continue
-                                iid = str(c.get('itemId', ''))
-                                qty = c.get('quantity', 0)
-                                if iid and qty > 0:
-                                    items[iid] = items.get(iid, 0) + qty
-                            if items:
-                                storages.append({'label': label, 'items': items})
-                        # Also include housing storage
-                        for hs in get_player_housing_items(eid):
-                            storages.append(hs)
-
+                        storages = get_player_housing_items(eid)
                         if storages:
                             return {'playerName': player_name, 'storages': storages}
                         return None
