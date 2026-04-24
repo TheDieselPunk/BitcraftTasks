@@ -474,7 +474,7 @@ function render() {
 
 function decorateTask(task, stallMap) {
   const items = task.items.map(item => {
-    const nearby = (stallMap[item.id] || []).filter(e => (e.stock == null || e.stock >= item.qty) && e.qty >= item.qty);
+    const nearby = (stallMap[item.id] || []).filter(e => e.stock == null || e.stock >= item.qty);
     return { ...item, stall_matches: nearby };
   });
 
