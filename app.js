@@ -1,5 +1,6 @@
 'use strict';
 
+const APP_VERSION = '1.2.0';
 const HEX = '⬡';
 
 const COLS = [
@@ -33,7 +34,7 @@ const S = {
   housedPlayers:   JSON.parse(localStorage.getItem('bcTasks_housing') || '[]'),
   selectedClaimId: localStorage.getItem('bcTasks_selectedClaim') || null,
   allClaims:       [],
-  marketRangeH:    0,
+  marketRangeH:    parseInt(localStorage.getItem('bcTasks_marketRange') || '0', 10),
   housingSources:  [],
 };
 
@@ -80,6 +81,13 @@ renderHousingChips();
 // Restore saved player name
 const _savedName = localStorage.getItem('bcTasks_username');
 if (_savedName) usernameInput.value = _savedName;
+
+// Restore saved market range slider
+marketRange.value    = S.marketRangeH;
+rangeVal.textContent = S.marketRangeH === 0 ? '0h' : `${S.marketRangeH}h`;
+
+// Set version label
+$('app-version').textContent = `v${APP_VERSION}`;
 
 usernameInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 btnSearch.addEventListener('click', doSearch);
@@ -166,6 +174,7 @@ let _rangeDebounce = null;
 marketRange.addEventListener('input', () => {
   S.marketRangeH = parseInt(marketRange.value, 10);
   rangeVal.textContent = S.marketRangeH === 0 ? '0h' : `${S.marketRangeH}h`;
+  localStorage.setItem('bcTasks_marketRange', S.marketRangeH);
   clearTimeout(_rangeDebounce);
   _rangeDebounce = setTimeout(() => { if (S.player) loadTasks(); }, 600);
 });
