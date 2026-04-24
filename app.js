@@ -288,7 +288,12 @@ async function loadTasks() {
     S.tasks       = data.tasks || [];
     S.tasksLoaded = true;
     startExpiryCountdown();
-    if (!S.tasks.length) emptyMsg.textContent = 'No incomplete tasks found.';
+    if (data.expiry && data.expiry * 1000 < Date.now()) {
+      emptyMsg.textContent = 'Tasks appear stale — the server may not have refreshed yet. Try again in a moment.';
+      S.tasks = [];
+    } else if (!S.tasks.length) {
+      emptyMsg.textContent = 'No incomplete tasks found.';
+    }
     render();
   } catch (err) {
     setStatus(`⚠ Tasks: ${err.message}`);
