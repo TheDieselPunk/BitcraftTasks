@@ -71,6 +71,7 @@ const tblHead       = $('tbl-head');
 const tblBody       = $('tbl-body');
 const mainTbl       = $('main-tbl');
 const emptyMsg      = $('empty-msg');
+const apiWarnings   = $('api-warnings');
 const tipBox        = $('tip-box');
 
 // ── Init ──────────────────────────────────────────────────────────────────────
@@ -255,6 +256,7 @@ async function load() {
   S.marketMap      = {};
   S.marketClaim    = null;
   clearTimers();
+  clearWarnings();
   setStatus('Loading…');
   emptyMsg.textContent = '';
   mainTbl.style.display = 'none';
@@ -296,6 +298,7 @@ async function loadTasks() {
     S.expiry      = data.expiry;
     S.tasks       = data.tasks || [];
     S.tasksLoaded = true;
+    showWarnings(data.warnings);
     startExpiryCountdown();
     if (data.expiry && data.expiry * 1000 < Date.now()) {
       emptyMsg.textContent = 'Tasks appear stale — the server may not have refreshed yet. Try again in a moment.';
@@ -330,6 +333,7 @@ async function loadStalls() {
     S.marketMap     = data.nearestMarket?.items  || {};
     S.marketClaim   = data.nearestMarket || null;
     S.stallsLoaded  = true;
+    showWarnings(data.warnings);
 
     // Populate autocomplete datalist with region stall owners
     if (data.ownerNames?.length) {
@@ -340,6 +344,7 @@ async function loadStalls() {
     render();
   } catch (err) {
     S.stallsLoaded = true;
+    showWarnings([`Stalls: ${err.message}`]);
     render();
   }
 }
@@ -724,6 +729,15 @@ function downloadCsv() {
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
 function setStatus(msg) { statusEl.textContent = msg; }
+function showWarnings(list) {
+  if (!list?.length) return;
+  apiWarnings.innerHTML += list.map(w => `<div class="warn-item">${esc(w)}</div>`).join('');
+  apiWarnings.style.display = '';
+}
+function clearWarnings() {
+  apiWarnings.innerHTML = '';
+  apiWarnings.style.display = 'none';
+}
 function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }

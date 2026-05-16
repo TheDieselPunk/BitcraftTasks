@@ -112,6 +112,7 @@ class handler(BaseHTTPRequestHandler):
         housing_names = [n.strip() for n in housing_raw.split(',') if n.strip()]
 
         try:
+            warnings = []
             PAGE_SIZE = 100
             first     = api_get('/api/stalls', {'limit': PAGE_SIZE, 'page': 1})
             stalls_raw = list(first.get('stalls', []))
@@ -119,6 +120,7 @@ class handler(BaseHTTPRequestHandler):
 
             # Fetch remaining pages in parallel
             if total_pages > 1:
+                failed_pages = 0
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     futures = {
                         pool.submit(api_get, '/api/stalls', {'limit': PAGE_SIZE, 'page': p}): p
@@ -128,7 +130,9 @@ class handler(BaseHTTPRequestHandler):
                         try:
                             stalls_raw.extend(f.result().get('stalls', []))
                         except Exception:
-                            pass
+                            failed_pages += 1
+                if failed_pages:
+                    warnings.append(f'Stall data may be incomplete — {failed_pages} page(s) failed to load')
 
             # Optionally pre-filter by region to reduce work
             if region_id:
@@ -287,7 +291,7 @@ class handler(BaseHTTPRequestHandler):
                                 'items':     stall_items,
                             })
                 except Exception:
-                    pass
+                    warnings.append(f'Could not load barter stall inventory for {claim_name_param or claim_id}')
 
             # Collect all owner names for autocomplete
             owner_names = sorted({
@@ -299,6 +303,8 @@ class handler(BaseHTTPRequestHandler):
             # Fetch housing player inventories
             housing_sources = []
             if housing_names:
+                _housing_errors = {}
+
                 def _fetch_housing_inv(player_name):
                     try:
                         search_data = api_get('/api/players', {'q': player_name, 'limit': 5})
@@ -310,18 +316,23 @@ class handler(BaseHTTPRequestHandler):
                         if not match and players_list:
                             match = players_list[0]
                         if not match:
-                            return None
+                            return player_name, None, 'not found'
                         eid = str(match['entityId'])
                         storages = get_player_housing_items(eid)
                         if storages:
-                            return {'playerName': player_name, 'storages': storages}
-                        return None
+                            return player_name, {'playerName': player_name, 'storages': storages}, None
+                        return player_name, None, None
                     except Exception:
-                        return None
+                        return player_name, None, 'API error'
 
                 with ThreadPoolExecutor(max_workers=5) as pool:
                     housing_results = list(pool.map(_fetch_housing_inv, housing_names))
-                housing_sources = [r for r in housing_results if r]
+                housing_sources = []
+                for pname, result, err in housing_results:
+                    if result:
+                        housing_sources.append(result)
+                    elif err:
+                        warnings.append(f'Could not load housing for {pname} ({err})')
 
             self._send(200, {
                 'stalls':         nearby,
@@ -330,6 +341,7 @@ class handler(BaseHTTPRequestHandler):
                 'ownerNames':     owner_names,
                 'barterSources':  barter_sources,
                 'housingSources': housing_sources,
+                'warnings':       warnings,
             })
 
         except Exception as e:

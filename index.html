@@ -175,6 +175,8 @@
     #toolbar button:hover { border-color: #f0a500; color: #f0a500; }
     #btn-filter.active { background: #0a1f0a; border-color: #52c46a; color: #52c46a; }
     #status     { font-size: .7rem; color: #444466; }
+    #api-warnings { padding: 4px 20px; font-size: .75rem; color: #c8902a; display: none; }
+    #api-warnings .warn-item::before { content: '⚠ '; }
 
     /* ── Table ── */
     #tbl-wrap { overflow-x: auto; padding: 0; }
@@ -313,6 +315,7 @@
     <span id="status"></span>
   </div>
 
+  <div id="api-warnings"></div>
   <div id="exp-section"></div>
 
   <div id="tbl-wrap">

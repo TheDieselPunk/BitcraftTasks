@@ -108,6 +108,14 @@ class handler(BaseHTTPRequestHandler):
         try:
             # Fetch all data in parallel
             results = {}
+            warnings = []
+            _warn_names = {
+                'tasks':   'traveler tasks',
+                'inv':     'player inventory',
+                'items':   'item catalog',
+                'cargo':   'cargo catalog',
+                'housing': 'housing storage',
+            }
             with ThreadPoolExecutor(max_workers=6) as pool:
                 futures = {
                     pool.submit(api_get, f'/api/players/{player_id}/traveler-tasks'): 'tasks',
@@ -122,6 +130,7 @@ class handler(BaseHTTPRequestHandler):
                         results[key] = f.result()
                     except Exception:
                         results[key] = {} if key in ('tasks', 'inv') else []
+                        warnings.append(f'Could not load {_warn_names.get(key, key)} from BitJita')
 
             tasks_data   = results.get('tasks', {})
             inv_data     = results.get('inv', {})
@@ -144,7 +153,7 @@ class handler(BaseHTTPRequestHandler):
             tasks = build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map)
 
             if not tasks:
-                self._send(200, {'tasks': [], 'expiry': tasks_data.get('expirationTimestamp')})
+                self._send(200, {'tasks': [], 'expiry': tasks_data.get('expirationTimestamp'), 'warnings': warnings})
                 return
 
             # Enrich crafting info — one API call per unique item, in parallel
@@ -200,8 +209,9 @@ class handler(BaseHTTPRequestHandler):
                         item['market_price'] = sufficient[0]['price'] if sufficient else None
 
             self._send(200, {
-                'tasks':  tasks,
-                'expiry': tasks_data.get('expirationTimestamp'),
+                'tasks':    tasks,
+                'expiry':   tasks_data.get('expirationTimestamp'),
+                'warnings': warnings,
             })
 
         except Exception as e:
