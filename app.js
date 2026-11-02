@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const HEX = '⬡';
 
 const COLS = [
@@ -28,6 +28,7 @@ const S = {
   credits:       [],
   rerollCost:    null,
   creditsReset:  null,
+  quests:        [],
   tasksLoaded:   false,
   stallsLoaded:  false,
   resetTimer:    null,
@@ -53,6 +54,7 @@ const claimList     = $('claim-list');
 let   claimNameMap  = {};   // name → id
 const resetCd       = $('reset-cd');
 const creditsSection = $('credits-section');
+const questsSection = $('quests-section');
 const expSection    = $('exp-section');
 const watchRow      = $('watch-row');
 const watchInput    = $('watch-input');
@@ -285,7 +287,7 @@ function getClaimsInRange(rangeH) {
 
 async function loadTasks() {
   try {
-    let url = `/api/tasks?player_id=${encodeURIComponent(S.player.id)}`;
+    let url = `/api/tasks?player_id=${encodeURIComponent(S.player.id)}&username=${encodeURIComponent(S.player.username)}`;
     if (S.marketRangeH > 0) {
       const inRange = getClaimsInRange(S.marketRangeH);
       if (inRange && inRange.length) {
@@ -303,9 +305,11 @@ async function loadTasks() {
     S.rerollCost   = data.reroll_cost ?? null;
     const resets   = S.credits.map(c => c.next_reset).filter(Boolean);
     S.creditsReset = resets.length ? Math.min(...resets) : null;
+    S.quests       = data.quests || [];
     S.tasksLoaded  = true;
     showWarnings(data.warnings);
     renderCredits();
+    renderQuests();
     startResetCountdown();
     if (!S.tasks.length) emptyMsg.textContent = 'No incomplete tasks found.';
     render();
@@ -448,6 +452,31 @@ function renderCredits() {
       return `<span class="exp-chip"><span class="exp-skill">${esc(c.traveler)}</span><span class="${low ? 'credit-low' : 'exp-amt'}">${c.credits}${max}</span></span>`;
     }).join('') +
     (S.rerollCost != null ? `<span class="sub">Reroll costs ${S.rerollCost}</span>` : '');
+}
+
+// ── Unlock quests ─────────────────────────────────────────────────────────────
+const QUEST_STATUS = { in_progress: 'Started', ready: 'Ready to start', locked: 'Locked' };
+
+function renderQuests() {
+  if (!S.quests.length) { questsSection.innerHTML = ''; return; }
+  questsSection.innerHTML =
+    `<div class="exp-label">Quests that unlock more tasks:</div>` +
+    S.quests.map(q => {
+      const needs = q.needs.map(n => {
+        const cls  = n.have >= n.qty ? 'inv-ok' : n.have ? 'inv-part' : '';
+        const have = n.have ? ` <span class="sub">(have ${n.have.toLocaleString()})</span>` : '';
+        return `<span class="${cls}">${n.qty.toLocaleString()}× ${esc(n.name)}</span>${have}`;
+      }).join(', ');
+      const req = q.requires.length ? `<span class="quest-req">needs ${esc(q.requires.join(', '))}</span>` : '';
+      return `<div class="quest-row quest-${q.status}">` +
+        `<span class="quest-status">${QUEST_STATUS[q.status] || q.status}</span>` +
+        `<span class="quest-trav">${esc(q.traveler)}</span>` +
+        `<span class="quest-unlock">${esc(q.unlocks)}</span>` +
+        `<span class="sub">${esc(q.name)}</span>` +
+        req +
+        (needs ? `<span class="quest-needs">${needs}</span>` : '') +
+      `</div>`;
+    }).join('');
 }
 
 // ── EXP summary ───────────────────────────────────────────────────────────────

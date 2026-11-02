@@ -180,6 +180,19 @@
     #credits-section:empty { display: none; }
     .credit-max  { color: #444466; font-weight: 400; }
     .credit-low  { color: #e05050; font-weight: 700; }
+    #quests-section { padding: 4px 20px 8px; font-size: .75rem; }
+    #quests-section:empty { display: none; }
+    #quests-section .exp-label { display: block; margin-bottom: 4px; }
+    .quest-row    { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid #111128; }
+    .quest-status { min-width: 92px; font-size: .65rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
+    .quest-trav   { color: #f0a500; font-weight: 800; min-width: 70px; }
+    .quest-unlock { color: #b47cff; }
+    .quest-req    { color: #e05050; font-size: .7rem; }
+    .quest-needs  { color: #c8c8dc; font-size: .7rem; flex-basis: 100%; padding-left: 102px; }
+    .quest-in_progress .quest-status { color: #f0a500; }
+    .quest-ready .quest-status       { color: #52c46a; }
+    .quest-locked                    { opacity: .55; }
+    .quest-locked .quest-status      { color: #666688; }
     .exp-label   { color: #666688; font-size: .75rem; margin-right: 4px; }
     .exp-chip    { background: #0f0f28; border: 1px solid #2a2a5a; border-radius: 12px; padding: 3px 10px; font-size: .75rem; display: inline-flex; gap: 6px; }
     .exp-skill   { color: #b47cff; }
@@ -317,6 +330,7 @@
 
   <div id="api-warnings"></div>
   <div id="credits-section"></div>
+  <div id="quests-section"></div>
   <div id="exp-section"></div>
 
   <div id="tbl-wrap">

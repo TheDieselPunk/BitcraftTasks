@@ -7,7 +7,8 @@ Returns all incomplete traveler tasks for a player, enriched with:
 - Crafting status per item (yes/partial/no/none)
 - Market price at the given claim (lowestSell from /api/market/item/{id})
 - Skill level requirement per task
-Plus per-traveler weekly task credits and the reroll cost.
+Plus per-traveler weekly task credits, the reroll cost, and the quests that unlock more task tiers.
+Optional: username=Name (needed to check quest level requirements).
 """
 
 import json
@@ -46,6 +47,97 @@ SKILL_NAMES = {
 }
 
 CREDIT_PERIOD = 7 * 24 * 3600   # task credits refill weekly (Thursdays ~14:46 UTC)
+
+# Keyword in an "Unlock ... Tasks" reward name → the traveler whose tasks it unlocks
+UNLOCK_TRAVELER = {
+    'Construction': 'Brico',
+    'Cooking':      'Heimlich',
+    'Merchanting':  'Rumbagh',
+    'Rumbagh':      'Rumbagh',
+    'Sailor':       'Svim',
+    'Tamer':        'Alesi',
+    'Slayer':       'Ramparte',
+}
+QUEST_STATUS_ORDER = {'in_progress': 0, 'ready': 1, 'locked': 2}
+
+
+def get_quest_catalog():
+    first  = api_get('/api/quests', {'limit': 100, 'page': 1})
+    quests = list(first.get('quests', []))
+    for page in range(2, (first.get('totalPages') or 1) + 1):
+        quests += api_get('/api/quests', {'limit': 100, 'page': page}).get('quests', [])
+    return quests
+
+
+def get_skill_levels(username, player_id):
+    """{skill_id_str: level} from the skills leaderboard (the player profile only has XP)."""
+    data = api_get('/api/leaderboard/skills', {'search': username})
+    me   = next((p for p in data.get('players', []) if str(p.get('entityId')) == str(player_id)), None)
+    return (me or {}).get('skills', {})
+
+
+def build_quests(catalog, player_quests, levels, inv_map, items_map, cargo_map):
+    """
+    Quests that unlock more traveler tasks: ones in progress, ones ready to start, and for travelers
+    with neither, the next locked one.
+    Returns [{name, traveler, unlocks, status, needs: [{name, qty, have}], requires: [str]}].
+    """
+    by_id     = {q.get('id'): q for q in catalog}
+    mine      = {q.get('questChainDescId'): q for q in player_quests}
+    completed = {qid for qid, q in mine.items() if q.get('completed')}
+
+    def item_name(c):
+        iid = str(c.get('item_id', ''))
+        if str(c.get('item_type', '')).lower() == 'cargo':
+            return cargo_map.get(iid) or iid
+        return items_map.get(iid) or iid
+
+    def needs(conds):
+        return [{'name': item_name(c), 'qty': c.get('quantity', 1), 'have': inv_map.get(str(c.get('item_id')), 0)}
+                for c in conds if c.get('type') == 'ItemStack']
+
+    found = []
+    for q in catalog:
+        if q.get('id') in completed or q.get('unstartable'):
+            continue
+        unlocks = [n for n in (item_name(r) for r in q.get('rewards', []) if r.get('type') == 'ItemStack')
+                   if n.startswith('Unlock ') and n.endswith(' Tasks')]
+        if not unlocks:
+            continue
+        label    = unlocks[0][len('Unlock '):]
+        traveler = next((t for k, t in UNLOCK_TRAVELER.items() if k in label), '?')
+        started  = mine.get(q.get('id'))
+        requires = []
+        if not started:
+            for r in q.get('requirements', []):
+                if r.get('type') == 'Level' and int(levels.get(str(r.get('skill_id')), 0)) < r.get('level', 0):
+                    requires.append(f"{SKILL_NAMES.get(r.get('skill_id'), 'Skill')} {r.get('level')}")
+                elif r.get('type') == 'QuestChain' and r.get('value') not in completed:
+                    prev = by_id.get(r.get('value'))
+                    requires.append(prev['name'] if prev else 'an earlier quest')
+        if started:
+            status, conds = 'in_progress', started.get('currentStageConditions') or []
+        else:
+            status = 'locked' if requires else 'ready'
+            conds  = [c for s in q.get('stageDetails', []) for c in s.get('completionConditions', [])]
+        found.append({
+            'name':     q.get('name', ''),
+            'traveler': traveler,
+            'unlocks':  label,
+            'status':   status,
+            'needs':    needs(conds),
+            'requires': requires,
+            '_level':   max((r.get('level', 0) for r in q.get('requirements', []) if r.get('type') == 'Level'), default=0),
+        })
+
+    active = {f['traveler'] for f in found if f['status'] != 'locked'}
+    shown  = [f for f in found if f['status'] != 'locked']
+    for trav in sorted({f['traveler'] for f in found} - active):
+        shown.append(min((f for f in found if f['traveler'] == trav), key=lambda f: f['_level']))
+    shown.sort(key=lambda f: (QUEST_STATUS_ORDER[f['status']], f['traveler'], f['_level']))
+    for f in shown:
+        del f['_level']
+    return shown
 
 
 def build_credits(tasks_data):
@@ -141,6 +233,7 @@ class handler(BaseHTTPRequestHandler):
         params    = parse_qs(urlparse(self.path).query)
         player_id = params.get('player_id', [''])[0].strip()
         claim_id  = params.get('claim_id',  [''])[0].strip() or None
+        username  = params.get('username',  [''])[0].strip()
 
         # market_claims: comma-separated "claimId:claimName" pairs (URL-encoded per pair)
         # When provided, replaces single claim_id for market price lookups
@@ -170,21 +263,28 @@ class handler(BaseHTTPRequestHandler):
                 'items':   'item catalog',
                 'cargo':   'cargo catalog',
                 'housing': 'housing storage',
+                'quests':  'quest list',
+                'my_quests': 'player quests',
+                'levels':  'skill levels',
             }
-            with ThreadPoolExecutor(max_workers=6) as pool:
+            with ThreadPoolExecutor(max_workers=9) as pool:
                 futures = {
                     pool.submit(api_get, f'/api/players/{player_id}/traveler-tasks'): 'tasks',
                     pool.submit(api_get, f'/api/players/{player_id}/inventories'):    'inv',
                     pool.submit(api_get, '/api/items'):                               'items',
                     pool.submit(api_get, '/api/cargo'):                               'cargo',
                     pool.submit(get_player_housing_items, player_id):                 'housing',
+                    pool.submit(get_quest_catalog):                                   'quests',
+                    pool.submit(api_get, f'/api/players/{player_id}/quests'):         'my_quests',
                 }
+                if username:
+                    futures[pool.submit(get_skill_levels, username, player_id)] = 'levels'
                 for f in as_completed(futures):
                     key = futures[f]
                     try:
                         results[key] = f.result()
                     except Exception:
-                        results[key] = {} if key in ('tasks', 'inv') else []
+                        results[key] = {} if key in ('tasks', 'inv', 'my_quests', 'levels') else []
                         warnings.append(f'Could not load {_warn_names.get(key, key)} from BitJita')
 
             tasks_data   = results.get('tasks', {})
@@ -211,6 +311,8 @@ class handler(BaseHTTPRequestHandler):
             meta = {
                 'credits':     build_credits(tasks_data),
                 'reroll_cost': tasks_data.get('rerollCreditCost'),
+                'quests':      build_quests(results.get('quests') or [], (results.get('my_quests') or {}).get('quests', []),
+                                            results.get('levels') or {}, inv_map, items_map, cargo_map),
                 'warnings':    warnings,
             }
 
