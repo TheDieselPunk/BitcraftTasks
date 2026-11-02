@@ -6,11 +6,15 @@ Returns all incomplete traveler tasks for a player, enriched with:
 - Player inventory counts per item
 - Crafting status per item (yes/partial/no/none)
 - Market price at the given claim (lowestSell from /api/market/item/{id})
+- Skill level requirement per task
+Plus per-traveler weekly task credits and the reroll cost.
 """
 
 import json
+import math
 import sys
 import os
+import time
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,14 +24,59 @@ import urllib.parse
 from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, get_market_prices_for_claims, get_player_housing_items, cors_headers
 
 
-TRAVELER_SKILL = {
-    'Svim':     'Sailing',
-    'Rumbagh':  'Merchanting',
-    'Ramparte': 'Slayer',
-    'Heimlich': 'Cooking',
-    'Brico':    'Building',
-    'Alesi':    'Taming',
+TRAVELERS = {
+    1: 'Rumbagh',
+    2: 'Svim',
+    3: 'Heimlich',
+    5: 'Brico',
+    6: 'Alesi',
+    7: 'Ramparte',
 }
+
+# weeklyCredits names some travelers by role instead of by name
+TRAVELER_TYPE = {'Alesi': 'Tamer', 'Ramparte': 'Slayer'}
+
+SKILL_NAMES = {
+    13: 'Cooking',
+    15: 'Construction',
+    17: 'Taming',
+    18: 'Slayer',
+    19: 'Merchanting',
+    21: 'Sailing',
+}
+
+CREDIT_PERIOD = 7 * 24 * 3600   # task credits refill weekly (Thursdays ~14:46 UTC)
+
+
+def build_credits(tasks_data):
+    """
+    Per-traveler task credits from the traveler-tasks response.
+    Returns [{traveler, credits, weekly, next_reset}] sorted by traveler name.
+    The reset is global, but lastReset only advances when the player is active,
+    so the next reset is the first weekly step from lastReset that is still ahead.
+    """
+    weekly = {w.get('traveler_type'): w.get('weekly_task_credits') for w in tasks_data.get('weeklyCredits') or []}
+    now = time.time()
+    credits = []
+    for tid, c in (tasks_data.get('taskCredits') or {}).items():
+        name   = (TRAVELERS.get(int(tid)) if str(tid).isdigit() else None) or str(tid)
+        last   = c.get('lastReset')
+        cap    = weekly.get(TRAVELER_TYPE.get(name, name))
+        amount = c.get('credits', 0)
+        next_reset = None
+        if last:
+            periods    = max(1, math.ceil((now - last) / CREDIT_PERIOD))
+            next_reset = last + periods * CREDIT_PERIOD
+            if periods > 1 and cap is not None:
+                amount = cap   # a reset has passed since lastReset, so credits are full again
+        credits.append({
+            'traveler':   name,
+            'credits':    amount,
+            'weekly':     cap,
+            'next_reset': next_reset,
+        })
+    credits.sort(key=lambda c: c['traveler'])
+    return credits
 
 
 def build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map):
@@ -36,7 +85,8 @@ def build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map):
         if task.get('completed'):
             continue
 
-        traveler = (task.get('description') or '').split(' ')[0] or '?'
+        traveler_id = task.get('travelerId')
+        traveler    = TRAVELERS.get(traveler_id) or (task.get('description') or '').split(' ')[0] or '?'
         reward   = next(
             (r.get('quantity', 0) for r in task.get('rewardedItems', []) if r.get('item_id') == 1),
             0
@@ -65,13 +115,18 @@ def build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map):
             continue
 
         exp      = task.get('rewardedExperience') or {}
+        level    = task.get('levelRequirement') or {}
+        skill_id = level.get('skill_id') or exp.get('skill_id')
         tasks.append({
             'traveler':    traveler,
+            'traveler_id': traveler_id,
             'description': task.get('description', ''),
             'reward':      reward,
             'exp_qty':     exp.get('quantity', 0),
             'exp_skill_id': str(exp.get('skill_id', '')),
-            'skill_name':  TRAVELER_SKILL.get(traveler, traveler),
+            'skill_name':  SKILL_NAMES.get(skill_id, traveler),
+            'min_level':   level.get('min_level'),
+            'max_level':   level.get('max_level'),
             'items':       items,
         })
 
@@ -152,8 +207,15 @@ class handler(BaseHTTPRequestHandler):
 
             tasks = build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map)
 
+            # Tasks no longer expire on a timer; travelers have weekly credits instead
+            meta = {
+                'credits':     build_credits(tasks_data),
+                'reroll_cost': tasks_data.get('rerollCreditCost'),
+                'warnings':    warnings,
+            }
+
             if not tasks:
-                self._send(200, {'tasks': [], 'expiry': tasks_data.get('expirationTimestamp'), 'warnings': warnings})
+                self._send(200, {'tasks': [], **meta})
                 return
 
             # Enrich crafting info — one API call per unique item, in parallel
@@ -208,11 +270,7 @@ class handler(BaseHTTPRequestHandler):
                         # market_price = lowest for backward-compat cost calculation
                         item['market_price'] = sufficient[0]['price'] if sufficient else None
 
-            self._send(200, {
-                'tasks':    tasks,
-                'expiry':   tasks_data.get('expirationTimestamp'),
-                'warnings': warnings,
-            })
+            self._send(200, {'tasks': tasks, **meta})
 
         except Exception as e:
             self._send(500, {'error': str(e)})

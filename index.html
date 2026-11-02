@@ -69,11 +69,7 @@
     #ps-detail { color: #666688; }
     #ps-market { display: flex; align-items: center; gap: 6px; color: #b47cff; font-size: .75rem; }
     #claim-input { background: #0f0f28; color: #b47cff; border: 1px solid #2a2a5a; border-radius: 4px; padding: 2px 6px; font-size: .75rem; width: 180px; }
-    #expiry-cd { font-size: .8rem; font-weight: 700; }
-    .cd-ok     { color: #5bc8e8; }
-    .cd-warn   { color: #f0a500; }
-    .cd-urgent { color: #e05050; animation: pulse 1s infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+    #reset-cd  { font-size: .8rem; font-weight: 700; color: #5bc8e8; }
 
     #range-group {
       display: flex; align-items: center; gap: 8px;
@@ -180,7 +176,10 @@
 
     /* ── Table ── */
     #tbl-wrap { overflow-x: auto; padding: 0; }
-    #exp-section { padding: 8px 20px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    #credits-section, #exp-section { padding: 8px 20px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    #credits-section:empty { display: none; }
+    .credit-max  { color: #444466; font-weight: 400; }
+    .credit-low  { color: #e05050; font-weight: 700; }
     .exp-label   { color: #666688; font-size: .75rem; margin-right: 4px; }
     .exp-chip    { background: #0f0f28; border: 1px solid #2a2a5a; border-radius: 12px; padding: 3px 10px; font-size: .75rem; display: inline-flex; gap: 6px; }
     .exp-skill   { color: #b47cff; }
@@ -211,6 +210,7 @@
 
     /* cell styles */
     .c-traveler  { font-weight: 800; color: #f0a500; white-space: nowrap; letter-spacing: .06em; }
+    .traveler-sub { color: #666688; font-size: .65rem; font-weight: 400; letter-spacing: 0; margin-top: 2px; }
     .c-items     { color: #c8c8dc; line-height: 1.7; }
     .c-inv       { max-width: 120px; line-height: 1.7; }
     .c-stalls    { max-width: 220px; line-height: 1.7; }
@@ -277,7 +277,7 @@
       <input id="claim-input" type="text" placeholder="Select claim…" list="claim-list" autocomplete="off">
       <datalist id="claim-list"></datalist>
     </div>
-    <div id="expiry-cd" class="cd-ok"></div>
+    <div id="reset-cd" title="Estimated: 7 days after the last weekly credit reset"></div>
     <div id="range-group">
       <span>Market range:</span>
       <input type="range" id="market-range" min="0" max="1000" value="0" step="10">
@@ -316,6 +316,7 @@
   </div>
 
   <div id="api-warnings"></div>
+  <div id="credits-section"></div>
   <div id="exp-section"></div>
 
   <div id="tbl-wrap">

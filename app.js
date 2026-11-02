@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const HEX = '⬡';
 
 const COLS = [
@@ -25,10 +25,12 @@ const S = {
   sortCol:       'profit',
   sortAsc:       false,
   filterOn:      false,
-  expiry:        null,
+  credits:       [],
+  rerollCost:    null,
+  creditsReset:  null,
   tasksLoaded:   false,
   stallsLoaded:  false,
-  expiryTimer:   null,
+  resetTimer:    null,
   notifyArmed:   false,
   watchedStalls:   JSON.parse(localStorage.getItem('bcTasks_watched') || '[]'),
   housedPlayers:   JSON.parse(localStorage.getItem('bcTasks_housing') || '[]'),
@@ -49,7 +51,8 @@ const psMarket      = $('ps-market');
 const claimInput    = $('claim-input');
 const claimList     = $('claim-list');
 let   claimNameMap  = {};   // name → id
-const expiryCd      = $('expiry-cd');
+const resetCd       = $('reset-cd');
+const creditsSection = $('credits-section');
 const expSection    = $('exp-section');
 const watchRow      = $('watch-row');
 const watchInput    = $('watch-input');
@@ -295,17 +298,16 @@ async function loadTasks() {
       url += `&claim_id=${encodeURIComponent(S.selectedClaimId)}`;
     }
     const data = await apiFetch(url);
-    S.expiry      = data.expiry;
-    S.tasks       = data.tasks || [];
-    S.tasksLoaded = true;
+    S.tasks        = data.tasks || [];
+    S.credits      = data.credits || [];
+    S.rerollCost   = data.reroll_cost ?? null;
+    const resets   = S.credits.map(c => c.next_reset).filter(Boolean);
+    S.creditsReset = resets.length ? Math.min(...resets) : null;
+    S.tasksLoaded  = true;
     showWarnings(data.warnings);
-    startExpiryCountdown();
-    if (data.expiry && data.expiry * 1000 < Date.now()) {
-      emptyMsg.textContent = 'Tasks appear stale — the server may not have refreshed yet. Try again in a moment.';
-      S.tasks = [];
-    } else if (!S.tasks.length) {
-      emptyMsg.textContent = 'No incomplete tasks found.';
-    }
+    renderCredits();
+    startResetCountdown();
+    if (!S.tasks.length) emptyMsg.textContent = 'No incomplete tasks found.';
     render();
   } catch (err) {
     setStatus(`⚠ Tasks: ${err.message}`);
@@ -433,6 +435,19 @@ function priceHtml(price_parts) {
     if (p.name === 'Hex Coin') return `<span class="sub">${HEX}${q}/u</span>`;
     return `<span class="sub">${q} ${esc(p.name)}/u</span>`;
   }).join(' <span class="sub">+</span> ');
+}
+
+// ── Task credits ──────────────────────────────────────────────────────────────
+function renderCredits() {
+  if (!S.credits.length) { creditsSection.innerHTML = ''; return; }
+  creditsSection.innerHTML =
+    `<span class="exp-label">Task credits:</span>` +
+    S.credits.map(c => {
+      const low = S.rerollCost != null && c.credits < S.rerollCost;
+      const max = c.weekly != null ? `<span class="credit-max">/${c.weekly}</span>` : '';
+      return `<span class="exp-chip"><span class="exp-skill">${esc(c.traveler)}</span><span class="${low ? 'credit-low' : 'exp-amt'}">${c.credits}${max}</span></span>`;
+    }).join('') +
+    (S.rerollCost != null ? `<span class="sub">Reroll costs ${S.rerollCost}</span>` : '');
 }
 
 // ── EXP summary ───────────────────────────────────────────────────────────────
@@ -624,8 +639,11 @@ function renderRow(task) {
   const profitStr  = task.profit != null ? `${HEX} ${task.profit.toLocaleString()}` : `<span class="dim">—</span>`;
   const profitCls  = task.profit == null ? '' : task.profit >= 0 ? ' profit-pos' : ' profit-neg';
 
+  const lvlStr = task.min_level > 1 ? ` Lv ${task.min_level}+` : '';
+  const expStr = task.exp_qty ? ` · ${task.exp_qty.toLocaleString()} xp` : '';
+
   return `<tr class="task-row">
-    <td class="c-traveler">${esc(task.traveler)}</td>
+    <td class="c-traveler">${esc(task.traveler)}<div class="traveler-sub">${esc(task.skill_name)}${lvlStr}${expStr}</div></td>
     <td class="c-items">${itemsHtml}</td>
     <td class="c-inv">${invHtml}</td>
     <td class="c-stalls">${stallHtml}</td>
@@ -664,35 +682,36 @@ function buildHeader() {
 
 // ── Timers ────────────────────────────────────────────────────────────────────
 function clearTimers() {
-  clearInterval(S.expiryTimer);
-  S.expiryTimer = null;
+  clearInterval(S.resetTimer);
+  S.resetTimer = null;
 }
 
-function startExpiryCountdown() {
-  if (!S.expiry) return;
+// Counts down to the weekly task-credit refill (estimated as 7 days after the last reset)
+function startResetCountdown() {
+  clearInterval(S.resetTimer);
+  if (!S.creditsReset) { resetCd.textContent = ''; return; }
   const tick = () => {
-    const ms = S.expiry * 1000 - Date.now();
+    const ms = S.creditsReset * 1000 - Date.now();
     if (ms <= 0) {
-      expiryCd.textContent = '⏰ Tasks expired';
-      expiryCd.className   = 'cd-urgent';
+      resetCd.textContent = '⟳ Task credits have reset';
       if (S.notifyArmed && Notification.permission === 'granted') {
         S.notifyArmed = false;   // fire once, then wait for next user refresh
-        new Notification('BitCraft Tasks Reset', {
-          body: `${S.player?.username ?? 'Your'} traveler tasks have reset — check back in!`,
+        new Notification('BitCraft Task Credits Reset', {
+          body: `${S.player?.username ?? 'Your'} traveler task credits have reset — check back in!`,
           icon: '/favicon.ico',
         });
       }
+      clearInterval(S.resetTimer);
       return;
     }
-    const h = Math.floor(ms / 3600000);
-    const m = Math.floor((ms % 3600000) / 60000);
-    const s = Math.floor((ms % 60000) / 1000);
-    expiryCd.textContent = `⏱ ${h}h ${String(m).padStart(2,'0')}m ${String(s).padStart(2,'0')}s`;
-    expiryCd.className   = h < 1 ? 'cd-urgent' : h < 2 ? 'cd-warn' : 'cd-ok';
+    const d  = Math.floor(ms / 86400000);
+    const h  = Math.floor((ms % 86400000) / 3600000);
+    const m  = String(Math.floor((ms % 3600000) / 60000)).padStart(2, '0');
+    const s  = String(Math.floor((ms % 60000) / 1000)).padStart(2, '0');
+    resetCd.textContent = `⏱ Credits reset in ${d ? `${d}d ${h}h ${m}m` : `${h}h ${m}m ${s}s`}`;
   };
-  clearInterval(S.expiryTimer);
   tick();
-  S.expiryTimer = setInterval(tick, 1000);
+  S.resetTimer = setInterval(tick, 1000);
 }
 
 // ── Data-tip hover ────────────────────────────────────────────────────────────
@@ -707,14 +726,14 @@ function bindTips() {
 function downloadCsv() {
   const q       = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
   const stallMap = buildStallMap();
-  const rows    = [['Traveler','Item','Qty','Type','Inv Have','Nearby Stall','Stall Price','Stall Dist','Market Price','Craftable','Reward','Cost','Profit'].join(',')];
+  const rows    = [['Traveler','Min Level','Item','Qty','Type','Inv Have','Nearby Stall','Stall Price','Stall Dist','Market Price','Craftable','Reward','Cost','Profit'].join(',')];
   for (const task of S.tasks) {
     const dt = decorateTask(task, stallMap);
     for (const item of dt.items) {
       const best = item.stall_matches?.[0];
       const bestPrice = best ? (hexPrice(best.price_parts) ?? (best.price_parts||[]).map(p=>`${p.qty} ${p.name}`).join('+')) : '';
       rows.push([
-        q(task.traveler), q(item.name), item.qty, item.type, item.inv_have,
+        q(task.traveler), task.min_level ?? '', q(item.name), item.qty, item.type, item.inv_have,
         q(best?.owner || ''), q(bestPrice), best?.distance ?? '',
         item.market_price ?? '',
         item.craft_info?.status || '', task.reward, dt.cost ?? '', dt.profit ?? '',
