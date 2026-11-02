@@ -8,7 +8,8 @@ Returns all incomplete traveler tasks for a player, enriched with:
 - Market price at the given claim (lowestSell from /api/market/item/{id})
 - Skill level requirement per task
 Plus per-traveler weekly task credits, the reroll cost, and the quests that unlock more task tiers.
-Optional: username=Name (needed to check quest level requirements).
+Optional: username=Name (needed to check quest level requirements), region_id=R (the player's region;
+storage elsewhere is labelled with its region).
 """
 
 import json
@@ -76,11 +77,12 @@ def get_skill_levels(username, player_id):
     return (me or {}).get('skills', {})
 
 
-def build_quests(catalog, player_quests, levels, inv_map, items_map, cargo_map):
+def build_quests(catalog, player_quests, levels, inv_map, inv_detail, items_map, cargo_map):
     """
     Quests that unlock more traveler tasks: ones in progress, ones ready to start, and for travelers
     with neither, the next locked one.
-    Returns [{name, traveler, unlocks, status, needs: [{id, type, name, qty, have}], requires: [str]}].
+    Returns [{name, traveler, unlocks, status, needs: [{id, type, name, qty, have, where}], requires: [str]}].
+    where = [{qty, label}]: the containers holding what the player has.
     """
     by_id     = {q.get('id'): q for q in catalog}
     mine      = {q.get('questChainDescId'): q for q in player_quests}
@@ -94,7 +96,8 @@ def build_quests(catalog, player_quests, levels, inv_map, items_map, cargo_map):
 
     def needs(conds):
         return [{'id': str(c.get('item_id')), 'type': 'cargo' if str(c.get('item_type', '')).lower() == 'cargo' else 'item',
-                 'name': item_name(c), 'qty': c.get('quantity', 1), 'have': inv_map.get(str(c.get('item_id')), 0)}
+                 'name': item_name(c), 'qty': c.get('quantity', 1), 'have': inv_map.get(str(c.get('item_id')), 0),
+                 'where': inv_detail.get(str(c.get('item_id')), [])}
                 for c in conds if c.get('type') == 'ItemStack']
 
     found = []
@@ -235,6 +238,7 @@ class handler(BaseHTTPRequestHandler):
         player_id = params.get('player_id', [''])[0].strip()
         claim_id  = params.get('claim_id',  [''])[0].strip() or None
         username  = params.get('username',  [''])[0].strip()
+        region_id = params.get('region_id', [''])[0].strip() or None
 
         # market_claims: comma-separated "claimId:claimName" pairs (URL-encoded per pair)
         # When provided, replaces single claim_id for market price lookups
@@ -267,8 +271,9 @@ class handler(BaseHTTPRequestHandler):
                 'quests':  'quest list',
                 'my_quests': 'player quests',
                 'levels':  'skill levels',
+                'regions': 'region names',
             }
-            with ThreadPoolExecutor(max_workers=9) as pool:
+            with ThreadPoolExecutor(max_workers=10) as pool:
                 futures = {
                     pool.submit(api_get, f'/api/players/{player_id}/traveler-tasks'): 'tasks',
                     pool.submit(api_get, f'/api/players/{player_id}/inventories'):    'inv',
@@ -277,6 +282,7 @@ class handler(BaseHTTPRequestHandler):
                     pool.submit(get_player_housing_items, player_id):                 'housing',
                     pool.submit(get_quest_catalog):                                   'quests',
                     pool.submit(api_get, f'/api/players/{player_id}/quests'):         'my_quests',
+                    pool.submit(api_get, '/api/regions'):                             'regions',
                 }
                 if username:
                     futures[pool.submit(get_skill_levels, username, player_id)] = 'levels'
@@ -297,7 +303,8 @@ class handler(BaseHTTPRequestHandler):
             cargo_data = cargo_raw.get('cargos', cargo_raw) if isinstance(cargo_raw, dict) else cargo_raw
 
             inv_map              = build_inv_map(inv_data)
-            inv_detail           = build_inv_detail_map(inv_data)
+            region_names         = {str(r.get('regionId')): r.get('regionName') for r in results.get('regions') or []}
+            inv_detail           = build_inv_detail_map(inv_data, region_names, region_id)
             items_map, cargo_map = build_name_maps(items_data, cargo_data)
 
             # Merge housing storage into inv_map and inv_detail
@@ -313,7 +320,7 @@ class handler(BaseHTTPRequestHandler):
                 'credits':     build_credits(tasks_data),
                 'reroll_cost': tasks_data.get('rerollCreditCost'),
                 'quests':      build_quests(results.get('quests') or [], (results.get('my_quests') or {}).get('quests', []),
-                                            results.get('levels') or {}, inv_map, items_map, cargo_map),
+                                            results.get('levels') or {}, inv_map, inv_detail, items_map, cargo_map),
                 'warnings':    warnings,
             }
 

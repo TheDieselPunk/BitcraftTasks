@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 const HEX = '⬡';
 
 const COLS = [
@@ -293,6 +293,7 @@ function getClaimsInRange(rangeH) {
 async function loadTasks() {
   try {
     let url = `/api/tasks?player_id=${encodeURIComponent(S.player.id)}&username=${encodeURIComponent(S.player.username)}`;
+    if (S.player.regionId) url += `&region_id=${S.player.regionId}`;
     if (S.marketRangeH > 0) {
       const inRange = getClaimsInRange(S.marketRangeH);
       if (inRange && inRange.length) {
@@ -524,7 +525,9 @@ function renderQuests() {
       const prices = [];
       const needs = q.needs.map(n => {
         const cls  = n.have >= n.qty ? 'inv-ok' : n.have ? 'inv-part' : '';
-        const have = n.have ? ` <span class="sub">(have ${n.have.toLocaleString()})</span>` : '';
+        const where = [...(n.where || [])].sort((a, b) => b.qty - a.qty)
+          .map(l => `${l.qty.toLocaleString()} in ${l.label}`).join('\n');
+        const have  = n.have ? ` <span class="sub quest-have" data-tip="${esc(where)}">(have ${n.have.toLocaleString()})</span>` : '';
         let price  = '';
         const pr   = questItemPrice(n);
         if (loading && n.qty > n.have) price = ` <span class="dim">pricing…</span>`;

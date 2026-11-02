@@ -204,25 +204,42 @@ def build_inv_map(inv_data, container_entity_id=None):
     return totals
 
 
-def build_inv_detail_map(inv_data):
+def inventory_label(bag, region_names=None, home_region=None):
     """
-    Build {item_id_str: [{qty, label}]} from a player inventories response.
-    label = inventoryName (+ "@ claimName" if stored remotely).
+    Where a container is: "Town Bank @ Jaruudsalem", "Recovery Chest (R12) at N 7055, E 4035", ...
+    Containers outside home_region get the region name appended.
     """
-    details = {}
+    name  = bag.get('inventoryName') or bag.get('buildingName') or 'Unnamed storage'
+    claim = bag.get('claimName')
+    rx, rz = bag.get('recoveryLocationX'), bag.get('recoveryLocationZ')
+    if claim:
+        label = f"{name} @ {claim}"
+    elif rx is not None and rz is not None:
+        label = f"{name} at N {round(rz / 3)}, E {round(rx / 3)}"
+    else:
+        label = name
+    region = bag.get('regionId')
+    if region_names and region is not None and str(region) != str(home_region):
+        label += f", {region_names.get(str(region)) or f'region {region}'}"
+    return label
+
+
+def build_inv_detail_map(inv_data, region_names=None, home_region=None):
+    """
+    Build {item_id_str: [{qty, label}]} from a player inventories response, one entry per container,
+    largest first. See inventory_label for the labels.
+    """
+    totals = {}
     for bag in inv_data.get('inventories', []):
-        raw_name = bag.get('inventoryName') or bag.get('buildingName') or 'Inventory'
-        claim    = bag.get('claimName')
-        label    = f"{raw_name} @ {claim}" if claim else raw_name
+        label = inventory_label(bag, region_names, home_region)
         for pocket in bag.get('pockets', []):
             c = pocket.get('contents')
             if not c:
                 continue
-            k = str(c['itemId'])
-            if k not in details:
-                details[k] = []
-            details[k].append({'qty': c.get('quantity', 0), 'label': label})
-    return details
+            per_label = totals.setdefault(str(c['itemId']), {})
+            per_label[label] = per_label.get(label, 0) + c.get('quantity', 0)
+    return {k: [{'qty': q, 'label': l} for l, q in sorted(v.items(), key=lambda x: -x[1])]
+            for k, v in totals.items()}
 
 
 def build_name_maps(items_data, cargo_data):
