@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.9.0';
 const HEX = '⬡';
 
 const COLS = [
@@ -29,7 +29,7 @@ const S = {
   rerollCost:    null,
   creditsReset:  null,
   quests:        [],
-  questPrices:   null,   // {item_id: {buy, cost, short, picks}}, or 'loading'
+  questPrices:   null,   // {item_id: {buy, cost, short, picks, craft?}}, or 'loading'
   questRegion:   '',
   questOffers:   null,   // {item_id: [offer]} from any region near the player, for the shopping route
   tasksLoaded:   false,
@@ -340,7 +340,7 @@ async function loadQuestPrices() {
   renderQuests();
   const p      = S.player;
   const params = [`items=${encodeURIComponent(Object.entries(need).map(([k, n]) => `${k}:${n}`).join(','))}`,
-                  `username=${encodeURIComponent(p.username)}`];
+                  `username=${encodeURIComponent(p.username)}`, `player_id=${encodeURIComponent(p.id)}`];
   if (p.regionId)          params.push(`regionId=${p.regionId}`);
   if (p.locationX != null) params.push(`x=${p.locationX}`, `z=${p.locationZ}`);
   try {
@@ -493,7 +493,7 @@ function renderCredits() {
 }
 
 // ── Unlock quests ─────────────────────────────────────────────────────────────
-const QUEST_STATUS = { in_progress: 'Started', ready: 'Ready to start', locked: 'Locked' };
+const QUEST_STATUS = { in_progress: 'Started', ready: 'Ready to start', next: 'Next', locked: 'Locked' };
 
 // Cost of buying what's missing of one quest item, taken from the cheapest offers found for it
 // (several quests can need the same item, so the lookup covers the largest shortfall)
@@ -514,6 +514,42 @@ function questItemPrice(n) {
   return { buy, cost, short: left, picks };
 }
 
+// "200× for ⬡65 — Solvenar (604h), stall: sfmason"
+function pickLine(pk) {
+  return `${pk.units.toLocaleString()}× for ${HEX}${pk.cost.toLocaleString()} — ${pk.claim}` +
+    `${pk.dist != null ? ` (${pk.dist.toLocaleString()}h)` : ''}, ${pk.source}: ${pk.seller}`;
+}
+
+// Where the price lookup bought from: "⬡5,100 Solvenar" or "⬡1,475 3 claims", then what's left unsold
+function boughtHtml(p, tip) {
+  const claims = [...new Set(p.picks.map(pk => pk.claim))];
+  let html = p.picks.length ? ` <span class="quest-price" data-tip="${esc(tip)}">${HEX}${p.cost.toLocaleString()}` +
+    ` <span class="sub">${esc(claims.length === 1 ? claims[0] : `${claims.length} claims`)}</span></span>` : '';
+  if (p.short) html += ` <span class="quest-short" data-tip="${esc(tip)}">` +
+    `${p.short === p.buy ? 'not for sale' : `${p.short.toLocaleString()} not for sale`}</span>`;
+  return html;
+}
+
+// Crafting covers what can't be bought when the player has the levels and every ingredient can be had
+function craftable(pr) {
+  const c = pr.craft;
+  return !!c && c.levels.every(l => l.have >= l.level) && c.ingredients.every(i => !i.short);
+}
+
+function craftHtml(n, c, region) {
+  const levels = c.levels.map(l => l.have >= l.level
+    ? `<span class="sub">${esc(l.skill)} ${l.level} ✓</span>`
+    : `<span class="quest-req">needs ${esc(l.skill)} ${l.level} (you have ${l.have})</span>`).join(' ');
+  const ingredients = c.ingredients.map(i => {
+    const tip = [`${i.qty.toLocaleString()} needed${i.have ? `, you have ${i.have.toLocaleString()}` : ''}`]
+      .concat(i.picks.map(pickLine), i.short ? [`${i.short.toLocaleString()} not for sale in ${region}`] : []).join('\n');
+    const status = i.buy ? boughtHtml(i, tip) : ` <span class="inv-ok">have</span>`;
+    return `<span class="quest-have" data-tip="${esc(tip)}">${i.qty.toLocaleString()}× ${esc(i.name)}</span>${status}`;
+  }).join(', ');
+  return `<div class="quest-craft">↳ Craft ${c.makes.toLocaleString()} ${esc(n.name)} ` +
+    `<span class="sub">(${c.crafts.toLocaleString()}× ${esc(c.recipe)} at ${esc(c.building)})</span> ${levels}: ${ingredients}</div>`;
+}
+
 function renderQuests() {
   if (!S.quests.length) { questsSection.innerHTML = ''; return; }
   const loading = S.questPrices === 'loading';
@@ -523,6 +559,7 @@ function renderQuests() {
     (loading ? '' : routeHtml()) +
     S.quests.map(q => {
       const prices = [];
+      const crafts = [];
       const needs = q.needs.map(n => {
         const cls  = n.have >= n.qty ? 'inv-ok' : n.have ? 'inv-part' : '';
         const where = [...(n.where || [])].sort((a, b) => b.qty - a.qty)
@@ -533,29 +570,28 @@ function renderQuests() {
         if (loading && n.qty > n.have) price = ` <span class="dim">pricing…</span>`;
         else if (pr) {
           prices.push(pr);
-          const claims = [...new Set(pr.picks.map(pk => pk.claim))];
-          const tip = pr.picks.map(pk =>
-            `${pk.units.toLocaleString()}× at ${HEX}${pk.unit.toLocaleString()}/u — ${pk.claim}` +
-            `${pk.dist != null ? ` (${pk.dist.toLocaleString()}h)` : ''}, ${pk.source}: ${pk.seller}`
-          ).concat(pr.short ? [`${pr.short.toLocaleString()} not for sale in ${region}`] : []).join('\n');
-          if (pr.picks.length) price = ` <span class="quest-price" data-tip="${esc(tip)}">${HEX}${pr.cost.toLocaleString()}` +
-            ` <span class="sub">${esc(claims.length === 1 ? claims[0] : `${claims.length} claims`)}</span></span>`;
-          if (pr.short) price += ` <span class="quest-short" data-tip="${esc(tip)}">` +
-            `${pr.short === pr.buy ? 'not for sale' : `${pr.short.toLocaleString()} not for sale`}</span>`;
+          const tip = pr.picks.map(pickLine)
+            .concat(pr.short ? [`${pr.short.toLocaleString()} not for sale in ${region}${pr.craft ? ', craft them instead' : ''}`] : []).join('\n');
+          price = boughtHtml(pr, tip);
+          if (pr.short && pr.craft) crafts.push(craftHtml(n, pr.craft, region));
         }
         return `<span class="${cls}">${n.qty.toLocaleString()}× ${esc(n.name)}</span>${have}${price}`;
       }).join(', ');
       let cost = '';
       if (q.needs.length && q.needs.every(n => n.have >= n.qty)) cost = `<span class="inv-ok">have all items</span>`;
       else if (prices.length) {
-        const total = prices.reduce((sum, p) => sum + p.cost, 0);
-        const short = prices.some(p => p.short) ? ' + items not for sale' : '';
-        cost = total
-          ? `<span class="quest-cost" data-tip="${esc(`Cheapest way to buy the missing items from markets and stalls in ${region}`)}">` +
-            `${HEX}${total.toLocaleString()} to finish${short}</span>`
+        const crafting = prices.filter(p => p.short && craftable(p));
+        const total = prices.reduce((sum, p) => sum + p.cost, 0) +
+          crafting.reduce((sum, p) => sum + p.craft.ingredients.reduce((s, i) => s + i.cost, 0), 0);
+        const short = prices.some(p => p.short && !craftable(p)) ? ' + items not for sale' : '';
+        const how   = crafting.length ? ' with crafting' : '';
+        cost = total || !short
+          ? `<span class="quest-cost" data-tip="${esc(`Cheapest way to buy the missing items${how ? ' (or the ingredients to craft them)' : ''} from markets and stalls in ${region}`)}">` +
+            `${HEX}${total.toLocaleString()} to finish${how}${short}</span>`
           : `<span class="quest-short">items not for sale in ${esc(region)}</span>`;
       }
-      const req = q.requires.length ? `<span class="quest-req">needs ${esc(q.requires.join(', '))}</span>` : '';
+      const req = q.requires.length ? `<span class="quest-req">needs ${esc(q.requires.join(', '))}</span>` :
+                  q.after?.length  ? `<span class="quest-after">after ${esc(q.after.join(', '))}</span>` : '';
       return `<div class="quest-row quest-${q.status}">` +
         `<span class="quest-status">${QUEST_STATUS[q.status] || q.status}</span>` +
         `<span class="quest-trav">${esc(q.traveler)}</span>` +
@@ -563,6 +599,7 @@ function renderQuests() {
         `<span class="sub">${esc(q.name)}</span>` +
         req + cost +
         (needs ? `<span class="quest-needs">${needs}</span>` : '') +
+        crafts.join('') +
       `</div>`;
     }).join('');
   bindTips(questsSection);
@@ -570,7 +607,7 @@ function renderQuests() {
 
 // ── Shopping route ────────────────────────────────────────────────────────────
 // Up to 3 claims to visit, in any region near the player, that sell everything for the most quests the
-// player can do now. Each item is bought at the stop that sells it cheapest.
+// player can do now or next (any quest that isn't locked). Each item is bought at the stop that sells it cheapest.
 // Returns {covered, total, missing, routes: [{label, cost, trip, stops: [{claim, region, leg, buys}]}]} or null.
 const ROUTE_RADIUS_H = 3000;   // matches ROUTE_RADIUS in api/quest_prices.py
 
@@ -664,13 +701,14 @@ function permutations(list) {
 function routeHtml() {
   const plan = planQuestRoute();
   if (!plan) return '';
-  const missing = plan.missing.length ? ` <span class="quest-short">not for sale nearby: ${esc(plan.missing.join(', '))}</span>` : '';
+  const missing = plan.missing.length ? ` <span class="quest-short">not enough for sale nearby for: ${esc(plan.missing.join(', '))}</span>` : '';
   if (!plan.routes.length) return `<div class="quest-route"><span class="route-head">Shopping route:</span>${missing}</div>`;
   const which = plan.covered === plan.total ? `all ${plan.total}` : `${plan.covered} of ${plan.total}`;
   const help  = `Up to 3 stops, in any region within ${ROUTE_RADIUS_H.toLocaleString()}h. ` +
                 'Each item is bought at the stop that sells it cheapest. Best balance weighs travel against cost. ' +
                 'Hover a stop to see what to buy there.';
-  return `<div class="quest-route"><span class="route-head" data-tip="${esc(help)}">Shopping route for ${which} quests you can do now:</span>${missing}` +
+  const when  = S.quests.some(q => q.status === 'next') ? 'now or next' : 'now';
+  return `<div class="quest-route"><span class="route-head" data-tip="${esc(help)}">Shopping route for ${which} quests you can do ${when}:</span>${missing}` +
     plan.routes.map(r =>
       `<div class="route-row"><span class="route-label">${r.label}</span>` +
       `<span class="quest-cost">${HEX}${r.cost.toLocaleString()}</span><span class="sub">${r.trip.toLocaleString()}h trip</span>` +

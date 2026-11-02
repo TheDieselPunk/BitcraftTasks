@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(__file__))
 import urllib.parse
-from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, get_market_prices_for_claims, get_player_housing_items, cors_headers
+from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, get_market_prices_for_claims, get_player_housing_items, get_skill_levels, cors_headers
 
 
 TRAVELERS = {
@@ -59,7 +59,7 @@ UNLOCK_TRAVELER = {
     'Tamer':        'Alesi',
     'Slayer':       'Ramparte',
 }
-QUEST_STATUS_ORDER = {'in_progress': 0, 'ready': 1, 'locked': 2}
+QUEST_STATUS_ORDER = {'in_progress': 0, 'ready': 1, 'next': 2, 'locked': 3}
 
 
 def get_quest_catalog():
@@ -70,19 +70,14 @@ def get_quest_catalog():
     return quests
 
 
-def get_skill_levels(username, player_id):
-    """{skill_id_str: level} from the skills leaderboard (the player profile only has XP)."""
-    data = api_get('/api/leaderboard/skills', {'search': username})
-    me   = next((p for p in data.get('players', []) if str(p.get('entityId')) == str(player_id)), None)
-    return (me or {}).get('skills', {})
-
-
 def build_quests(catalog, player_quests, levels, inv_map, inv_detail, items_map, cargo_map):
     """
-    Quests that unlock more traveler tasks: ones in progress, ones ready to start, and for travelers
-    with neither, the next locked one.
-    Returns [{name, traveler, unlocks, status, needs: [{id, type, name, qty, have, where}], requires: [str]}].
+    Quests that unlock more traveler tasks: ones in progress, ones ready to start, ones that come next
+    (the player's levels are high enough and every earlier quest is in progress, ready or next), and for
+    travelers with none of those, the next locked one.
+    Returns [{name, traveler, unlocks, status, needs: [{id, type, name, qty, have, where}], requires: [str], after: [str]}].
     where = [{qty, label}]: the containers holding what the player has.
+    requires = what a locked quest still needs; after = the earlier quests a next quest waits on.
     """
     by_id     = {q.get('id'): q for q in catalog}
     mine      = {q.get('questChainDescId'): q for q in player_quests}
@@ -111,18 +106,17 @@ def build_quests(catalog, player_quests, levels, inv_map, inv_detail, items_map,
         label    = unlocks[0][len('Unlock '):]
         traveler = next((t for k, t in UNLOCK_TRAVELER.items() if k in label), '?')
         started  = mine.get(q.get('id'))
-        requires = []
+        low, prev = [], []   # unmet level requirements, unfinished earlier quests
         if not started:
             for r in q.get('requirements', []):
                 if r.get('type') == 'Level' and int(levels.get(str(r.get('skill_id')), 0)) < r.get('level', 0):
-                    requires.append(f"{SKILL_NAMES.get(r.get('skill_id'), 'Skill')} {r.get('level')}")
+                    low.append(f"{SKILL_NAMES.get(r.get('skill_id'), 'Skill')} {r.get('level')}")
                 elif r.get('type') == 'QuestChain' and r.get('value') not in completed:
-                    prev = by_id.get(r.get('value'))
-                    requires.append(prev['name'] if prev else 'an earlier quest')
+                    prev.append(r.get('value'))
         if started:
             status, conds = 'in_progress', started.get('currentStageConditions') or []
         else:
-            status = 'locked' if requires else 'ready'
+            status = 'locked' if low or prev else 'ready'
             conds  = [c for s in q.get('stageDetails', []) for c in s.get('completionConditions', [])]
         found.append({
             'name':     q.get('name', ''),
@@ -130,9 +124,25 @@ def build_quests(catalog, player_quests, levels, inv_map, inv_detail, items_map,
             'unlocks':  label,
             'status':   status,
             'needs':    needs(conds),
-            'requires': requires,
+            '_id':      q.get('id'),
+            '_low':     low,
+            '_prev':    prev,
             '_level':   max((r.get('level', 0) for r in q.get('requirements', []) if r.get('type') == 'Level'), default=0),
         })
+
+    # A locked quest comes next when the levels are met and each earlier quest is already on the way
+    by_quest = {f['_id']: f for f in found}
+    changed  = True
+    while changed:
+        changed = False
+        for f in found:
+            if f['status'] == 'locked' and not f['_low'] and \
+                    all(p in by_quest and by_quest[p]['status'] != 'locked' for p in f['_prev']):
+                f['status'] = 'next'
+                changed = True
+
+    def quest_name(qid):
+        return (by_id.get(qid) or {}).get('name') or 'an earlier quest'
 
     active = {f['traveler'] for f in found if f['status'] != 'locked'}
     shown  = [f for f in found if f['status'] != 'locked']
@@ -140,7 +150,10 @@ def build_quests(catalog, player_quests, levels, inv_map, inv_detail, items_map,
         shown.append(min((f for f in found if f['traveler'] == trav), key=lambda f: f['_level']))
     shown.sort(key=lambda f: (QUEST_STATUS_ORDER[f['status']], f['traveler'], f['_level']))
     for f in shown:
-        del f['_level']
+        f['requires'] = f['_low'] + [quest_name(p) for p in f['_prev']] if f['status'] == 'locked' else []
+        f['after']    = [quest_name(p) for p in f['_prev']] if f['status'] == 'next' else []
+        for k in ('_id', '_low', '_prev', '_level'):
+            del f[k]
     return shown
 
 

@@ -131,6 +131,13 @@ def get_nearest_claim(x, z, region_id):
     return nearest
 
 
+def get_skill_levels(username, player_id):
+    """{skill_id_str: level} from the skills leaderboard (the player profile only has XP)."""
+    data = api_get('/api/leaderboard/skills', {'search': username})
+    me   = next((p for p in data.get('players', []) if str(p.get('entityId')) == str(player_id)), None)
+    return (me or {}).get('skills', {})
+
+
 def get_player_housing_items(player_id):
     """
     Fetch all housing storage for a player.
