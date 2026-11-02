@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 const HEX = '⬡';
 
 const COLS = [
@@ -31,6 +31,7 @@ const S = {
   quests:        [],
   questPrices:   null,   // {item_id: {buy, cost, short, picks}}, or 'loading'
   questRegion:   '',
+  questOffers:   null,   // {item_id: [offer]} from any region near the player, for the shopping route
   tasksLoaded:   false,
   stallsLoaded:  false,
   resetTimer:    null,
@@ -263,6 +264,7 @@ async function load() {
   S.marketMap      = {};
   S.marketClaim    = null;
   S.questPrices    = null;
+  S.questOffers    = null;
   clearTimers();
   clearWarnings();
   setStatus('Loading…');
@@ -345,6 +347,7 @@ async function loadQuestPrices() {
     if (S.quests !== quests) return;   // a newer load replaced these quests
     S.questPrices = data.items || {};
     S.questRegion = data.region || '';
+    S.questOffers = data.offers || null;
     showWarnings(data.warnings);
   } catch (err) {
     if (S.quests !== quests) return;
@@ -516,6 +519,7 @@ function renderQuests() {
   const region  = S.questRegion || 'your region';
   questsSection.innerHTML =
     `<div class="exp-label">Quests that unlock more tasks:</div>` +
+    (loading ? '' : routeHtml()) +
     S.quests.map(q => {
       const prices = [];
       const needs = q.needs.map(n => {
@@ -559,6 +563,125 @@ function renderQuests() {
       `</div>`;
     }).join('');
   bindTips(questsSection);
+}
+
+// ── Shopping route ────────────────────────────────────────────────────────────
+// Up to 3 claims to visit, in any region near the player, that sell everything for the most quests the
+// player can do now. Each item is bought at the stop that sells it cheapest.
+// Returns {covered, total, missing, routes: [{label, cost, trip, stops: [{claim, region, leg, buys}]}]} or null.
+const ROUTE_RADIUS_H = 3000;   // matches ROUTE_RADIUS in api/quest_prices.py
+
+function planQuestRoute() {
+  const p = S.player;
+  if (!S.questOffers || p?.locationX == null) return null;
+  const quests = S.quests.filter(q => q.status !== 'locked' && q.needs.some(n => n.qty > n.have));
+  const wants  = quests.flatMap((q, qi) => q.needs.filter(n => n.qty > n.have)
+    .map(n => ({ qi, quest: q.name, name: n.name, id: n.id, buy: n.qty - n.have })));
+  if (!wants.length) return null;
+
+  // Cost of each wanted item at each claim that has enough of it, cheapest sellers first
+  const claims = new Map();
+  wants.forEach((w, wi) => {
+    const byClaim = new Map();
+    for (const o of S.questOffers[w.id] || []) {
+      const key = `${o.region}|${o.claim}`;
+      if (!byClaim.has(key)) byClaim.set(key, []);
+      byClaim.get(key).push(o);
+    }
+    for (const [key, list] of byClaim) {
+      let left = w.buy, cost = 0;
+      for (const o of list.sort((a, b) => a.price / a.bundle - b.price / b.bundle)) {
+        if (left <= 0) break;
+        const trades = Math.min(Math.ceil(left / o.bundle), Math.floor(o.units / o.bundle));
+        cost += trades * o.price;
+        left -= trades * o.bundle;
+      }
+      if (left > 0) continue;
+      if (!claims.has(key)) claims.set(key, { claim: list[0].claim, region: list[0].region, x: list[0].x, z: list[0].z, cost: [] });
+      claims.get(key).cost[wi] = cost;
+    }
+  });
+
+  const home = { x: p.locationX, z: p.locationZ };
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z) / 3;
+  let best = null;   // {covered, routes} — the routes covering the most quests
+  const consider = stops => {
+    const at = wants.map((w, wi) => stops.reduce((s, c) => c.cost[wi] != null && (!s || c.cost[wi] < s.cost[wi]) ? c : s, null));
+    const done = quests.map((q, qi) => wants.every((w, wi) => w.qi !== qi || at[wi]));
+    const covered = done.filter(Boolean).length;
+    if (!covered || (best && covered < best.covered)) return;
+    const used = new Set(wants.map((w, wi) => done[w.qi] ? at[wi] : null));
+    if (stops.some(c => !used.has(c))) return;   // every stop must be needed
+    const cost = wants.reduce((sum, w, wi) => sum + (done[w.qi] ? at[wi].cost[wi] : 0), 0);
+    let trip = Infinity, order = null;
+    for (const perm of permutations(stops)) {
+      let d = 0, pos = home;
+      for (const c of perm) { d += dist(pos, c); pos = c; }
+      if (d < trip) { trip = d; order = perm; }
+    }
+    const route = { cost, trip, order, at, done };
+    if (!best || covered > best.covered) best = { covered, routes: [route] };
+    else best.routes.push(route);
+  };
+  const cands = [...claims.values()];
+  for (let i = 0; i < cands.length; i++) {
+    consider([cands[i]]);
+    for (let j = i + 1; j < cands.length; j++) {
+      consider([cands[i], cands[j]]);
+      for (let k = j + 1; k < cands.length; k++) consider([cands[i], cands[j], cands[k]]);
+    }
+  }
+  if (!best) return { covered: 0, total: quests.length, missing: quests.map(q => q.name), routes: [] };
+
+  const describe = (label, r) => {
+    let pos = home;
+    return { label, cost: r.cost, trip: Math.round(r.trip), stops: r.order.map(c => {
+      const leg = Math.round(dist(pos, c));
+      pos = c;
+      const buys = wants.map((w, wi) => ({ ...w, cost: c.cost[wi] })).filter((w, wi) => r.done[w.qi] && r.at[wi] === c);
+      return { claim: c.claim, region: c.region, leg, buys };
+    }) };
+  };
+  // Best balance: the smallest sum of trip and cost, each relative to the best possible
+  const pick     = score => best.routes.reduce((a, r) => score(r) < score(a) ? r : a);
+  const shortest = pick(r => r.trip + r.cost * 1e-9);
+  const cheapest = pick(r => r.cost + r.trip * 1e-9);
+  const balanced = pick(r => r.trip / Math.max(shortest.trip, 1) + r.cost / Math.max(cheapest.cost, 1));
+  const routes   = [['Best balance', balanced], ['Shortest trip', shortest], ['Cheapest', cheapest]]
+    .filter(([, r], i, all) => all.findIndex(([, x]) => x === r) === i)
+    .map(([label, r]) => describe(label, r));
+  return { covered: best.covered, total: quests.length, missing: quests.filter((q, qi) => !balanced.done[qi]).map(q => q.name), routes };
+}
+
+function permutations(list) {
+  if (list.length <= 1) return [list];
+  return list.flatMap((x, i) => permutations([...list.slice(0, i), ...list.slice(i + 1)]).map(rest => [x, ...rest]));
+}
+
+function routeHtml() {
+  const plan = planQuestRoute();
+  if (!plan) return '';
+  const missing = plan.missing.length ? ` <span class="quest-short">not for sale nearby: ${esc(plan.missing.join(', '))}</span>` : '';
+  if (!plan.routes.length) return `<div class="quest-route"><span class="route-head">Shopping route:</span>${missing}</div>`;
+  const which = plan.covered === plan.total ? `all ${plan.total}` : `${plan.covered} of ${plan.total}`;
+  const help  = `Up to 3 stops, in any region within ${ROUTE_RADIUS_H.toLocaleString()}h. ` +
+                'Each item is bought at the stop that sells it cheapest. Best balance weighs travel against cost. ' +
+                'Hover a stop to see what to buy there.';
+  return `<div class="quest-route"><span class="route-head" data-tip="${esc(help)}">Shopping route for ${which} quests you can do now:</span>${missing}` +
+    plan.routes.map(r =>
+      `<div class="route-row"><span class="route-label">${r.label}</span>` +
+      `<span class="quest-cost">${HEX}${r.cost.toLocaleString()}</span><span class="sub">${r.trip.toLocaleString()}h trip</span>` +
+      r.stops.map((s, i) => {
+        const subtotal = s.buys.reduce((sum, b) => sum + b.cost, 0);
+        const tip = s.buys.map(b => `${b.buy.toLocaleString()}× ${b.name} — ${HEX}${b.cost.toLocaleString()} (${b.quest})`)
+          .concat(`Spend here: ${HEX}${subtotal.toLocaleString()}`).join('\n');
+        const region = s.region && s.region !== S.questRegion ? `, ${s.region}` : '';
+        return `${i ? '<span class="sub">→</span>' : ''}<span class="route-stop" data-tip="${esc(tip)}">${i + 1}. ${esc(s.claim)}` +
+          `<span class="sub">${esc(region)} ${i ? '+' : ''}${s.leg.toLocaleString()}h</span></span>`;
+      }).join('') +
+      `</div>`
+    ).join('') +
+  `</div>`;
 }
 
 // ── EXP summary ───────────────────────────────────────────────────────────────

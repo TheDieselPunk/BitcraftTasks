@@ -7,6 +7,8 @@ from stalls that sell for Hex Coin. Stall stock is checked against what the stal
 Returns:
   - items: {id: {buy, cost, short, picks: [{units, cost, unit, claim, source, seller, dist}]}}
     short = units that can't be bought in the region; dist is in display units (raw / 3)
+  - offers: {id: [{claim, region, x, z, price, bundle, units, source, seller}]}: every offer within
+    ROUTE_RADIUS of the player in any region, for planning a shopping route (price is per bundle)
   - region: region name
 """
 
@@ -23,6 +25,7 @@ from _lib import api_get, distance, cors_headers, get_claims
 
 INFINITE_STOCK = 2_000_000_000
 HEX_COIN_ID    = '1'
+ROUTE_RADIUS   = 3000   # how far (display units) to look for shopping-route stops, in any region
 
 
 def dist_h(px, pz, x, z):
@@ -129,10 +132,16 @@ class handler(BaseHTTPRequestHandler):
             region   = ''
             sources  = {k: [] for k in need}
 
+            def keep(region_of, x, z):
+                """In the player's region (for prices) or close enough for a shopping route."""
+                in_region = not region_id or str(region_of) == region_id
+                d = dist_h(px, pz, x, z)
+                return in_region or (d is not None and d <= ROUTE_RADIUS), in_region, d
+
             with ThreadPoolExecutor(max_workers=10) as pool:
                 markets = {k: pool.submit(api_get, f'/api/market/{k[1]}/{k[0]}') for k in need}
                 stalls_f = pool.submit(get_all_stalls)
-                claims_f = pool.submit(get_claims, px, pz, region_id) if px is not None else None
+                claims_f = pool.submit(get_claims, px, pz, None) if px is not None else None
 
                 for k, f in markets.items():
                     try:
@@ -141,18 +150,19 @@ class handler(BaseHTTPRequestHandler):
                         warnings.append(f'Could not load market orders for item {k[0]}')
                         continue
                     for o in orders:
-                        if region_id and str(o.get('regionId')) != region_id:
-                            continue
-                        if (o.get('ownerUsername') or '').lower() == me:
+                        ok, in_region, d = keep(o.get('regionId'), o.get('claimLocationX'), o.get('claimLocationZ'))
+                        if not ok or (o.get('ownerUsername') or '').lower() == me:
                             continue
                         try:
                             price, units = int(o['priceThreshold']), int(o['quantity'])
                         except (KeyError, TypeError, ValueError):
                             continue
-                        region = region or o.get('regionName') or ''
+                        if in_region:
+                            region = region or o.get('regionName') or ''
                         sources[k].append({'bundle': 1, 'price': price, 'units': units, 'claim': o.get('claimName', ''),
-                                           'source': 'market', 'seller': o.get('ownerUsername') or '',
-                                           'dist': dist_h(px, pz, o.get('claimLocationX'), o.get('claimLocationZ'))})
+                                           'source': 'market', 'seller': o.get('ownerUsername') or '', 'dist': d,
+                                           'region': o.get('regionName') or '', 'in_region': in_region,
+                                           'x': o.get('claimLocationX'), 'z': o.get('claimLocationZ')})
 
                 try:
                     stalls, failed = stalls_f.result()
@@ -161,16 +171,22 @@ class handler(BaseHTTPRequestHandler):
                 except Exception:
                     stalls = []
                     warnings.append('Could not load stalls for quest prices')
-                if region_id:
-                    stalls = [s for s in stalls if str(s.get('regionId', '')) == region_id]
+                stalls = [s for s in stalls if keep(s.get('regionId'), s.get('locationX'), s.get('locationZ'))[0]]
                 claims = claims_f.result()[1] if claims_f else []
 
             # Check each candidate stall's real stock: building stalls sit in the claim's buildings,
-            # deployable stands in their owner's inventories
-            offers    = stall_offers(stalls, set(need), me)
-            claim_ids = {c['name']: c['id'] for c in claims}
-            cids      = {claim_ids.get(o['stall']['claimName']) for o in offers} - {None}
-            owners    = {str(o['stall'].get('ownerEntityId')) for o in offers if o['stall'].get('ownerEntityId')}
+            # deployable stands in their owner's inventories. Claim names can repeat across regions,
+            # so match on position too (a stall's position is its claim's).
+            def claim_id(st):
+                x, z = st.get('locationX'), st.get('locationZ')
+                at = (st['claimName'], round(float(x)), round(float(z))) if x is not None and z is not None else None
+                return claim_at.get(at) or claim_named.get(st['claimName'])
+
+            offers      = stall_offers(stalls, set(need), me)
+            claim_at    = {(c['name'], round(c['x']), round(c['z'])): c['id'] for c in claims}
+            claim_named = {c['name']: c['id'] for c in claims}
+            cids        = {claim_id(o['stall']) for o in offers} - {None}
+            owners      = {str(o['stall'].get('ownerEntityId')) for o in offers if o['stall'].get('ownerEntityId')}
 
             def fetch(path):
                 try:
@@ -178,24 +194,30 @@ class handler(BaseHTTPRequestHandler):
                 except Exception:
                     return None
 
-            with ThreadPoolExecutor(max_workers=8) as pool:
+            with ThreadPoolExecutor(max_workers=10) as pool:
                 claim_inv = dict(zip(cids, pool.map(lambda c: fetch(f'/api/claims/{c}/inventories'), cids)))
                 owner_inv = dict(zip(owners, pool.map(lambda e: fetch(f'/api/players/{e}/inventories'), owners)))
 
             for o in offers:
                 st    = o['stall']
-                held  = stall_stock(o, claim_inv.get(claim_ids.get(st['claimName'])), owner_inv.get(str(st.get('ownerEntityId'))))
+                held  = stall_stock(o, claim_inv.get(claim_id(st)), owner_inv.get(str(st.get('ownerEntityId'))))
                 caps  = [u for u in (held, None if o['trades'] is None else o['trades'] * o['bundle']) if u is not None]
                 if not caps or min(caps) <= 0:
                     continue
-                region = region or st.get('regionName') or ''
+                _, in_region, d = keep(st.get('regionId'), st.get('locationX'), st.get('locationZ'))
+                if in_region:
+                    region = region or st.get('regionName') or ''
                 sources[o['key']].append({'bundle': o['bundle'], 'price': o['price'], 'units': min(caps),
                                           'claim': st['claimName'], 'source': 'stall',
-                                          'seller': st.get('nickname') or st.get('ownerName') or '',
-                                          'dist': dist_h(px, pz, st.get('locationX'), st.get('locationZ'))})
+                                          'seller': st.get('nickname') or st.get('ownerName') or '', 'dist': d,
+                                          'region': st.get('regionName') or '', 'in_region': in_region,
+                                          'x': st.get('locationX'), 'z': st.get('locationZ')})
 
+            route_fields = ('claim', 'region', 'x', 'z', 'price', 'bundle', 'units', 'source', 'seller')
             self._send(200, {
-                'items':    {k[0]: cheapest(n, sources[k]) for k, n in need.items()},
+                'items':    {k[0]: cheapest(n, [s for s in sources[k] if s['in_region']]) for k, n in need.items()},
+                'offers':   {k[0]: [{f: s[f] for f in route_fields} for s in sources[k]
+                                    if s['dist'] is not None and s['dist'] <= ROUTE_RADIUS] for k in need},
                 'region':   region,
                 'warnings': warnings,
             })
