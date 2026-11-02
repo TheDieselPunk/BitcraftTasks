@@ -2,6 +2,7 @@
   "rewrites": [
     { "source": "/api/search", "destination": "/api/search.py" },
     { "source": "/api/tasks",  "destination": "/api/tasks.py"  },
-    { "source": "/api/stalls", "destination": "/api/stalls.py" }
+    { "source": "/api/stalls", "destination": "/api/stalls.py" },
+    { "source": "/api/quest_prices", "destination": "/api/quest_prices.py" }
   ]
 }

@@ -80,7 +80,7 @@ def build_quests(catalog, player_quests, levels, inv_map, items_map, cargo_map):
     """
     Quests that unlock more traveler tasks: ones in progress, ones ready to start, and for travelers
     with neither, the next locked one.
-    Returns [{name, traveler, unlocks, status, needs: [{name, qty, have}], requires: [str]}].
+    Returns [{name, traveler, unlocks, status, needs: [{id, type, name, qty, have}], requires: [str]}].
     """
     by_id     = {q.get('id'): q for q in catalog}
     mine      = {q.get('questChainDescId'): q for q in player_quests}
@@ -93,7 +93,8 @@ def build_quests(catalog, player_quests, levels, inv_map, items_map, cargo_map):
         return items_map.get(iid) or iid
 
     def needs(conds):
-        return [{'name': item_name(c), 'qty': c.get('quantity', 1), 'have': inv_map.get(str(c.get('item_id')), 0)}
+        return [{'id': str(c.get('item_id')), 'type': 'cargo' if str(c.get('item_type', '')).lower() == 'cargo' else 'item',
+                 'name': item_name(c), 'qty': c.get('quantity', 1), 'have': inv_map.get(str(c.get('item_id')), 0)}
                 for c in conds if c.get('type') == 'ItemStack']
 
     found = []

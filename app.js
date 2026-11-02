@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const HEX = '⬡';
 
 const COLS = [
@@ -29,6 +29,8 @@ const S = {
   rerollCost:    null,
   creditsReset:  null,
   quests:        [],
+  questPrices:   null,   // {item_id: {buy, cost, short, picks}}, or 'loading'
+  questRegion:   '',
   tasksLoaded:   false,
   stallsLoaded:  false,
   resetTimer:    null,
@@ -260,6 +262,7 @@ async function load() {
   S.housingSources = [];
   S.marketMap      = {};
   S.marketClaim    = null;
+  S.questPrices    = null;
   clearTimers();
   clearWarnings();
   setStatus('Loading…');
@@ -310,6 +313,7 @@ async function loadTasks() {
     showWarnings(data.warnings);
     renderCredits();
     renderQuests();
+    loadQuestPrices();
     startResetCountdown();
     if (!S.tasks.length) emptyMsg.textContent = 'No incomplete tasks found.';
     render();
@@ -318,6 +322,36 @@ async function loadTasks() {
     S.tasksLoaded = true;
     render();
   }
+}
+
+// Cheapest way to buy the quest items the player is missing, from markets and stalls in their region
+async function loadQuestPrices() {
+  const quests = S.quests;
+  const need   = {};
+  for (const q of quests) for (const n of q.needs) {
+    const key = `${n.id}:${n.type}`;
+    if (n.qty > n.have) need[key] = Math.max(need[key] || 0, n.qty - n.have);
+  }
+  if (!Object.keys(need).length) return;
+  S.questPrices = 'loading';
+  renderQuests();
+  const p      = S.player;
+  const params = [`items=${encodeURIComponent(Object.entries(need).map(([k, n]) => `${k}:${n}`).join(','))}`,
+                  `username=${encodeURIComponent(p.username)}`];
+  if (p.regionId)          params.push(`regionId=${p.regionId}`);
+  if (p.locationX != null) params.push(`x=${p.locationX}`, `z=${p.locationZ}`);
+  try {
+    const data = await apiFetch(`/api/quest_prices?${params.join('&')}`);
+    if (S.quests !== quests) return;   // a newer load replaced these quests
+    S.questPrices = data.items || {};
+    S.questRegion = data.region || '';
+    showWarnings(data.warnings);
+  } catch (err) {
+    if (S.quests !== quests) return;
+    S.questPrices = null;
+    showWarnings([`Quest prices: ${err.message}`]);
+  }
+  renderQuests();
 }
 
 async function loadStalls() {
@@ -457,26 +491,74 @@ function renderCredits() {
 // ── Unlock quests ─────────────────────────────────────────────────────────────
 const QUEST_STATUS = { in_progress: 'Started', ready: 'Ready to start', locked: 'Locked' };
 
+// Cost of buying what's missing of one quest item, taken from the cheapest offers found for it
+// (several quests can need the same item, so the lookup covers the largest shortfall)
+function questItemPrice(n) {
+  const buy = n.qty - n.have;
+  const p   = S.questPrices?.[n.id];
+  if (buy <= 0 || !p || p === 'loading') return null;
+  if (p.buy === buy) return p;
+  let left = buy, cost = 0;
+  const picks = [];
+  for (const pk of p.picks) {
+    if (left <= 0) break;
+    const units = Math.min(pk.units, left);
+    picks.push({ ...pk, units, cost: units * pk.unit });
+    cost += units * pk.unit;
+    left -= units;
+  }
+  return { buy, cost, short: left, picks };
+}
+
 function renderQuests() {
   if (!S.quests.length) { questsSection.innerHTML = ''; return; }
+  const loading = S.questPrices === 'loading';
+  const region  = S.questRegion || 'your region';
   questsSection.innerHTML =
     `<div class="exp-label">Quests that unlock more tasks:</div>` +
     S.quests.map(q => {
+      const prices = [];
       const needs = q.needs.map(n => {
         const cls  = n.have >= n.qty ? 'inv-ok' : n.have ? 'inv-part' : '';
         const have = n.have ? ` <span class="sub">(have ${n.have.toLocaleString()})</span>` : '';
-        return `<span class="${cls}">${n.qty.toLocaleString()}× ${esc(n.name)}</span>${have}`;
+        let price  = '';
+        const pr   = questItemPrice(n);
+        if (loading && n.qty > n.have) price = ` <span class="dim">pricing…</span>`;
+        else if (pr) {
+          prices.push(pr);
+          const claims = [...new Set(pr.picks.map(pk => pk.claim))];
+          const tip = pr.picks.map(pk =>
+            `${pk.units.toLocaleString()}× at ${HEX}${pk.unit.toLocaleString()}/u — ${pk.claim}` +
+            `${pk.dist != null ? ` (${pk.dist.toLocaleString()}h)` : ''}, ${pk.source}: ${pk.seller}`
+          ).concat(pr.short ? [`${pr.short.toLocaleString()} not for sale in ${region}`] : []).join('\n');
+          if (pr.picks.length) price = ` <span class="quest-price" data-tip="${esc(tip)}">${HEX}${pr.cost.toLocaleString()}` +
+            ` <span class="sub">${esc(claims.length === 1 ? claims[0] : `${claims.length} claims`)}</span></span>`;
+          if (pr.short) price += ` <span class="quest-short" data-tip="${esc(tip)}">` +
+            `${pr.short === pr.buy ? 'not for sale' : `${pr.short.toLocaleString()} not for sale`}</span>`;
+        }
+        return `<span class="${cls}">${n.qty.toLocaleString()}× ${esc(n.name)}</span>${have}${price}`;
       }).join(', ');
+      let cost = '';
+      if (q.needs.length && q.needs.every(n => n.have >= n.qty)) cost = `<span class="inv-ok">have all items</span>`;
+      else if (prices.length) {
+        const total = prices.reduce((sum, p) => sum + p.cost, 0);
+        const short = prices.some(p => p.short) ? ' + items not for sale' : '';
+        cost = total
+          ? `<span class="quest-cost" data-tip="${esc(`Cheapest way to buy the missing items from markets and stalls in ${region}`)}">` +
+            `${HEX}${total.toLocaleString()} to finish${short}</span>`
+          : `<span class="quest-short">items not for sale in ${esc(region)}</span>`;
+      }
       const req = q.requires.length ? `<span class="quest-req">needs ${esc(q.requires.join(', '))}</span>` : '';
       return `<div class="quest-row quest-${q.status}">` +
         `<span class="quest-status">${QUEST_STATUS[q.status] || q.status}</span>` +
         `<span class="quest-trav">${esc(q.traveler)}</span>` +
         `<span class="quest-unlock">${esc(q.unlocks)}</span>` +
         `<span class="sub">${esc(q.name)}</span>` +
-        req +
+        req + cost +
         (needs ? `<span class="quest-needs">${needs}</span>` : '') +
       `</div>`;
     }).join('');
+  bindTips(questsSection);
 }
 
 // ── EXP summary ───────────────────────────────────────────────────────────────
@@ -744,8 +826,8 @@ function startResetCountdown() {
 }
 
 // ── Data-tip hover ────────────────────────────────────────────────────────────
-function bindTips() {
-  tblBody.querySelectorAll('[data-tip]').forEach(el => {
+function bindTips(root = tblBody) {
+  root.querySelectorAll('[data-tip]').forEach(el => {
     el.addEventListener('mouseenter', e => showTip(e, esc(el.dataset.tip).replace(/\n/g, '<br>')));
     el.addEventListener('mouseleave', hideTip);
   });
