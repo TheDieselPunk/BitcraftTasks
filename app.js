@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.10.0';
 const HEX = '⬡';
 
 const COLS = [
@@ -557,6 +557,7 @@ function renderQuests() {
   questsSection.innerHTML =
     `<div class="exp-label">Quests that unlock more tasks:</div>` +
     (loading ? '' : routeHtml()) +
+    pickupHtml() +
     S.quests.map(q => {
       const prices = [];
       const crafts = [];
@@ -603,6 +604,59 @@ function renderQuests() {
       `</div>`;
     }).join('');
   bindTips(questsSection);
+}
+
+// ── Pick-up list ──────────────────────────────────────────────────────────────
+// What the player already owns toward the quests they can do now or next, plus ingredients for items
+// they'll craft, grouped by where it's stored. Takes from storage in their own region first, then from
+// places holding more of the items, then from bigger stacks.
+function pickupHtml() {
+  const wanted = [];   // [{id, name, qty, where}]
+  for (const q of S.quests.filter(q => q.status !== 'locked')) {
+    for (const n of q.needs) {
+      if (n.have) wanted.push({ id: n.id, name: n.name, qty: n.qty, where: n.where || [] });
+      const pr = questItemPrice(n);
+      if (pr?.short && craftable(pr)) {
+        for (const i of pr.craft.ingredients) if (i.have) wanted.push({ id: i.id, name: i.name, qty: i.qty, where: i.where || [] });
+      }
+    }
+  }
+  if (!wanted.length) return '';
+
+  const placeOf = w => w.place || w.container;
+  const score   = {};   // place -> how many wanted items are stored there
+  for (const w of wanted) for (const p of new Set(w.where.map(placeOf))) score[p] = (score[p] || 0) + 1;
+  const stock = {};     // item id -> containers with what's left in them
+  const picks = new Map();   // place -> container -> item name -> qty
+  for (const w of wanted) {
+    stock[w.id] ||= w.where.map(s => ({ ...s }))
+      .sort((a, b) => (a.elsewhere - b.elsewhere) || (score[placeOf(b)] - score[placeOf(a)]) || (b.qty - a.qty));
+    let left = w.qty;
+    for (const s of stock[w.id]) {
+      const n = Math.min(left, s.qty);
+      if (n <= 0) continue;
+      s.qty -= n;
+      left  -= n;
+      const place = placeOf(s), container = s.place ? s.container : '';
+      if (!picks.has(place)) picks.set(place, new Map());
+      if (!picks.get(place).has(container)) picks.get(place).set(container, new Map());
+      const items = picks.get(place).get(container);
+      items.set(w.name, (items.get(w.name) || 0) + n);
+    }
+  }
+
+  const help = 'Items you own that count toward the quests you can do now or next, plus ingredients for anything ' +
+               "you'll craft. Uses storage in your own region first, then places that hold more of the items.";
+  return `<div class="quest-route"><span class="route-head" data-tip="${esc(help)}">Pick up what you already have:</span>` +
+    [...picks].map(([place, containers]) =>
+      `<div class="route-row"><span class="pickup-place">${esc(place)}</span>` +
+      [...containers].map(([container, items]) =>
+        `<span>${container ? `<span class="sub">${esc(container)}:</span> ` : ''}` +
+        [...items].map(([name, qty]) => `${qty.toLocaleString()}× ${esc(name)}`).join(', ') + `</span>`
+      ).join('<span class="sub">·</span>') +
+      `</div>`
+    ).join('') +
+  `</div>`;
 }
 
 // ── Shopping route ────────────────────────────────────────────────────────────

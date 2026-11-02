@@ -23,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(__file__))
 import urllib.parse
-from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, get_market_prices_for_claims, get_player_housing_items, get_skill_levels, cors_headers
+from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, get_market_prices_for_claims, get_player_housing_items, get_skill_levels, merge_housing, cors_headers
 
 
 TRAVELERS = {
@@ -76,7 +76,7 @@ def build_quests(catalog, player_quests, levels, inv_map, inv_detail, items_map,
     (the player's levels are high enough and every earlier quest is in progress, ready or next), and for
     travelers with none of those, the next locked one.
     Returns [{name, traveler, unlocks, status, needs: [{id, type, name, qty, have, where}], requires: [str], after: [str]}].
-    where = [{qty, label}]: the containers holding what the player has.
+    where = [{qty, label, container, place, elsewhere}]: the containers holding what the player has.
     requires = what a locked quest still needs; after = the earlier quests a next quest waits on.
     """
     by_id     = {q.get('id'): q for q in catalog}
@@ -320,11 +320,7 @@ class handler(BaseHTTPRequestHandler):
             inv_detail           = build_inv_detail_map(inv_data, region_names, region_id)
             items_map, cargo_map = build_name_maps(items_data, cargo_data)
 
-            # Merge housing storage into inv_map and inv_detail
-            for storage in housing_items:
-                for iid, qty in storage['items'].items():
-                    inv_map[iid] = inv_map.get(iid, 0) + qty
-                    inv_detail.setdefault(iid, []).append({'qty': qty, 'label': storage['label']})
+            merge_housing(inv_map, inv_detail, housing_items)
 
             tasks = build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map)
 

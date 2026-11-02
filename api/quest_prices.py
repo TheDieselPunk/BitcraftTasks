@@ -10,7 +10,8 @@ Returns:
   - items: {id: {buy, cost, short, picks: [{units, cost, unit, claim, source, seller, dist}], craft?}}
     short = units that can't be bought in the region; dist is in display units (raw / 3)
     craft = {recipe, building, crafts, makes, levels: [{skill, level, have}],
-             ingredients: [{id, type, name, qty, have, buy, cost, short, picks}]}
+             ingredients: [{id, type, name, qty, have, where, buy, cost, short, picks}]}
+    where = [{qty, label, container, place, elsewhere}]: the player's containers holding the ingredient
   - offers: {id: [{claim, region, x, z, price, bundle, units, source, seller}]}: every offer within
     ROUTE_RADIUS of the player in any region, for planning a shopping route (price is per bundle)
   - region: region name
@@ -25,7 +26,8 @@ from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(__file__))
-from _lib import api_get, distance, cors_headers, get_claims, build_inv_map, get_player_housing_items, get_skill_levels
+from _lib import api_get, distance, cors_headers, get_claims, build_inv_map, build_inv_detail_map, get_player_housing_items, \
+    get_skill_levels, merge_housing
 
 INFINITE_STOCK = 2_000_000_000
 HEX_COIN_ID    = '1'
@@ -61,13 +63,18 @@ def get_all_stalls():
     return stalls, failed
 
 
-def player_items(player_id):
-    """{item_id: qty} across the player's inventories, banks and house storage."""
-    inv = build_inv_map(api_get(f'/api/players/{player_id}/inventories'))
-    for storage in get_player_housing_items(player_id):
-        for iid, qty in storage['items'].items():
-            inv[iid] = inv.get(iid, 0) + qty
-    return inv
+def player_items(player_id, home_region):
+    """({item_id: qty}, {item_id: [{qty, label, container, place, elsewhere}]}) across the player's inventories,
+    banks and house storage."""
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        inv_f     = pool.submit(api_get, f'/api/players/{player_id}/inventories')
+        houses_f  = pool.submit(get_player_housing_items, player_id)
+        regions_f = pool.submit(fetch, '/api/regions')
+        inv_data, houses, regions = inv_f.result(), houses_f.result(), regions_f.result() or []
+    names = {str(r.get('regionId')): r.get('regionName') for r in regions}
+    have, where = build_inv_map(inv_data), build_inv_detail_map(inv_data, names, home_region)
+    merge_housing(have, where, houses)
+    return have, where
 
 
 def stall_offers(stalls, wanted, me):
@@ -123,7 +130,7 @@ def cheapest(need, sources):
     return {'buy': need, 'cost': cost, 'short': max(0, left), 'picks': picks}
 
 
-def craft_plan(key, units, detail, have, levels):
+def craft_plan(key, units, detail, have, where, levels):
     """How to craft `units` of an item: its recipe and the ingredients still needed. None without a recipe."""
     recipes = [r for r in (detail or {}).get('craftingRecipes') or [] if r.get('consumedItems')]
     if not recipes:
@@ -139,7 +146,7 @@ def craft_plan(key, units, detail, have, levels):
         qty = (c.get('quantity') or 1) * crafts
         got = have.get(iid, 0)
         ingredients.append({'id': iid, 'type': 'cargo' if c.get('itemType') == 1 else 'item', 'name': c.get('name') or iid,
-                            'qty': qty, 'have': got, 'buy': max(0, qty - got)})
+                            'qty': qty, 'have': got, 'buy': max(0, qty - got), 'where': where.get(iid, []) if got else []})
     return {
         'recipe':      recipe.get('name', ''),
         'building':    recipe.get('buildingName', ''),
@@ -260,7 +267,7 @@ class handler(BaseHTTPRequestHandler):
                 markets  = market(pool, need)
                 stalls_f = pool.submit(get_all_stalls)
                 claims_f = pool.submit(get_claims, px, pz, None) if px is not None else None
-                have_f   = pool.submit(player_items, player_id) if player_id else None
+                have_f   = pool.submit(player_items, player_id, region_id) if player_id else None
                 levels_f = pool.submit(get_skill_levels, username, player_id) if player_id and username else None
 
                 try:
@@ -273,9 +280,9 @@ class handler(BaseHTTPRequestHandler):
                 src = Sources(region_id, username.lower(), px, pz, stalls, claims_f.result()[1] if claims_f else [])
                 add_markets(markets)
                 try:
-                    have = have_f.result() if have_f else {}
+                    have, where = have_f.result() if have_f else ({}, {})
                 except Exception:
-                    have = {}
+                    have, where = {}, {}
                     warnings.append('Could not load your inventory for crafting ingredients')
                 try:
                     levels = levels_f.result() if levels_f else {}
@@ -290,7 +297,7 @@ class handler(BaseHTTPRequestHandler):
             if short:
                 with ThreadPoolExecutor(max_workers=10) as pool:
                     details = list(pool.map(lambda k: fetch(f'/api/{"cargo" if k[1] == "cargo" else "items"}/{k[0]}'), short))
-                plans = {k: craft_plan(k, items[k[0]]['short'], d, have, levels) for k, d in zip(short, details)}
+                plans = {k: craft_plan(k, items[k[0]]['short'], d, have, where, levels) for k, d in zip(short, details)}
                 plans = {k: p for k, p in plans.items() if p}
                 extra = {(i['id'], i['type']) for p in plans.values() for i in p['ingredients'] if i['buy']} - set(need)
                 if extra:

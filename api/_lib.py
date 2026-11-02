@@ -143,7 +143,7 @@ def get_player_housing_items(player_id):
     Fetch all housing storage for a player.
     Calls /api/players/{id}/housing to list houses, then fetches each
     /api/players/{id}/housing/{houseId} in parallel for inventory contents.
-    Returns list of {label, items: {item_id_str: qty}}.
+    Returns list of {label, container, claim, items: {item_id_str: qty}}.
     """
     try:
         houses = api_get(f'/api/players/{player_id}/housing')
@@ -177,7 +177,7 @@ def get_player_housing_items(player_id):
                 if iid and qty > 0:
                     items[iid] = items.get(iid, 0) + qty
             if items:
-                results.append({'label': label, 'items': items})
+                results.append({'label': label, 'container': name_part, 'claim': claim_name, 'items': items})
         return results
 
     all_storages = []
@@ -211,42 +211,58 @@ def build_inv_map(inv_data, container_entity_id=None):
     return totals
 
 
-def inventory_label(bag, region_names=None, home_region=None):
+def inventory_place(bag, region_names=None, home_region=None):
     """
-    Where a container is: "Town Bank @ Jaruudsalem", "Recovery Chest (R12) at N 7055, E 4035", ...
-    Containers outside home_region get the region name appended.
+    (container, place, elsewhere) for a player's container: ("Town Bank", "Jaruudsalem", False),
+    ("Recovery Chest (R12) at N 7055, E 4035", None, False), ... place is the claim it's in, if any.
+    Containers outside home_region are marked elsewhere and get the region name appended.
     """
-    name  = bag.get('inventoryName') or bag.get('buildingName') or 'Unnamed storage'
-    claim = bag.get('claimName')
-    rx, rz = bag.get('recoveryLocationX'), bag.get('recoveryLocationZ')
-    if claim:
-        label = f"{name} @ {claim}"
-    elif rx is not None and rz is not None:
-        label = f"{name} at N {round(rz / 3)}, E {round(rx / 3)}"
-    else:
-        label = name
-    region = bag.get('regionId')
-    if region_names and region is not None and str(region) != str(home_region):
-        label += f", {region_names.get(str(region)) or f'region {region}'}"
-    return label
+    container = bag.get('inventoryName') or bag.get('buildingName') or 'Unnamed storage'
+    place     = bag.get('claimName') or None
+    rx, rz    = bag.get('recoveryLocationX'), bag.get('recoveryLocationZ')
+    if not place and rx is not None and rz is not None:
+        container = f"{container} at N {round(rz / 3)}, E {round(rx / 3)}"
+    region    = bag.get('regionId')
+    elsewhere = bool(region_names) and region is not None and str(region) != str(home_region)
+    if elsewhere:
+        suffix = f", {region_names.get(str(region)) or f'region {region}'}"
+        if place:
+            place += suffix
+        else:
+            container += suffix
+    return container, place, elsewhere
+
+
+def stored(qty, container, place, elsewhere=False):
+    """One entry of an inventory detail map: "Town Bank @ Jaruudsalem" as label, plus its parts."""
+    return {'qty': qty, 'label': f"{container} @ {place}" if place else container,
+            'container': container, 'place': place, 'elsewhere': elsewhere}
 
 
 def build_inv_detail_map(inv_data, region_names=None, home_region=None):
     """
-    Build {item_id_str: [{qty, label}]} from a player inventories response, one entry per container,
-    largest first. See inventory_label for the labels.
+    Build {item_id_str: [{qty, label, container, place, elsewhere}]} from a player inventories response,
+    one entry per container, largest first. See inventory_place for the names.
     """
     totals = {}
     for bag in inv_data.get('inventories', []):
-        label = inventory_label(bag, region_names, home_region)
+        where = inventory_place(bag, region_names, home_region)
         for pocket in bag.get('pockets', []):
             c = pocket.get('contents')
             if not c:
                 continue
-            per_label = totals.setdefault(str(c['itemId']), {})
-            per_label[label] = per_label.get(label, 0) + c.get('quantity', 0)
-    return {k: [{'qty': q, 'label': l} for l, q in sorted(v.items(), key=lambda x: -x[1])]
+            per_place = totals.setdefault(str(c['itemId']), {})
+            per_place[where] = per_place.get(where, 0) + c.get('quantity', 0)
+    return {k: [stored(q, *where) for where, q in sorted(v.items(), key=lambda x: -x[1])]
             for k, v in totals.items()}
+
+
+def merge_housing(inv_map, inv_detail, storages):
+    """Add house storage (from get_player_housing_items) to an inventory map and its detail map."""
+    for storage in storages:
+        for iid, qty in storage['items'].items():
+            inv_map[iid] = inv_map.get(iid, 0) + qty
+            inv_detail.setdefault(iid, []).append(stored(qty, storage['container'], storage['claim'] or None))
 
 
 def build_name_maps(items_data, cargo_data):
