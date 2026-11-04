@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.11.0';
 const HEX = '⬡';
 
 const COLS = [
@@ -514,7 +514,7 @@ function questItemPrice(n) {
   return { buy, cost, short: left, picks };
 }
 
-// "200× for ⬡65 — Solvenar (604h), stall: sfmason"
+// "30× for ⬡5,100 — Solvenar (522h), stall: sfmason's Sturdy Barter Stall (Rumbagh T1 5)"
 function pickLine(pk) {
   return `${pk.units.toLocaleString()}× for ${HEX}${pk.cost.toLocaleString()} — ${pk.claim}` +
     `${pk.dist != null ? ` (${pk.dist.toLocaleString()}h)` : ''}, ${pk.source}: ${pk.seller}`;
@@ -684,15 +684,18 @@ function planQuestRoute() {
     }
     for (const [key, list] of byClaim) {
       let left = w.buy, cost = 0;
+      const from = new Set();
       for (const o of list.sort((a, b) => a.price / a.bundle - b.price / b.bundle)) {
         if (left <= 0) break;
         const trades = Math.min(Math.ceil(left / o.bundle), Math.floor(o.units / o.bundle));
+        if (trades > 0) from.add(`${o.source}: ${o.seller}`);
         cost += trades * o.price;
         left -= trades * o.bundle;
       }
       if (left > 0) continue;
-      if (!claims.has(key)) claims.set(key, { claim: list[0].claim, region: list[0].region, x: list[0].x, z: list[0].z, cost: [] });
+      if (!claims.has(key)) claims.set(key, { claim: list[0].claim, region: list[0].region, x: list[0].x, z: list[0].z, cost: [], from: [] });
       claims.get(key).cost[wi] = cost;
+      claims.get(key).from[wi] = from;
     }
   });
 
@@ -732,7 +735,7 @@ function planQuestRoute() {
     return { label, cost: r.cost, trip: Math.round(r.trip), stops: r.order.map(c => {
       const leg = Math.round(dist(pos, c));
       pos = c;
-      const buys = wants.map((w, wi) => ({ ...w, cost: c.cost[wi] })).filter((w, wi) => r.done[w.qi] && r.at[wi] === c);
+      const buys = wants.map((w, wi) => ({ ...w, cost: c.cost[wi], from: c.from[wi] })).filter((w, wi) => r.done[w.qi] && r.at[wi] === c);
       return { claim: c.claim, region: c.region, leg, buys };
     }) };
   };
@@ -768,7 +771,8 @@ function routeHtml() {
       `<span class="quest-cost">${HEX}${r.cost.toLocaleString()}</span><span class="sub">${r.trip.toLocaleString()}h trip</span>` +
       r.stops.map((s, i) => {
         const subtotal = s.buys.reduce((sum, b) => sum + b.cost, 0);
-        const tip = s.buys.map(b => `${b.buy.toLocaleString()}× ${b.name} — ${HEX}${b.cost.toLocaleString()} (${b.quest})`)
+        const tip = s.buys.map(b => `${b.buy.toLocaleString()}× ${b.name} — ${HEX}${b.cost.toLocaleString()} (${b.quest})\n` +
+                                    `    ${[...b.from].join(', ')}`)
           .concat(`Spend here: ${HEX}${subtotal.toLocaleString()}`).join('\n');
         const region = s.region && s.region !== S.questRegion ? `, ${s.region}` : '';
         return `${i ? '<span class="sub">→</span>' : ''}<span class="route-stop" data-tip="${esc(tip)}">${i + 1}. ${esc(s.claim)}` +

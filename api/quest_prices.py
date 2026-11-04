@@ -9,6 +9,7 @@ player still needs (player_id gives what they have) and where to buy those in th
 Returns:
   - items: {id: {buy, cost, short, picks: [{units, cost, unit, claim, source, seller, dist}], craft?}}
     short = units that can't be bought in the region; dist is in display units (raw / 3)
+    seller = the market order's owner, or the stall to look for, like "sfmason's Sturdy Barter Stall (Rumbagh T1 5)"
     craft = {recipe, building, crafts, makes, levels: [{skill, level, have}],
              ingredients: [{id, type, name, qty, have, where, buy, cost, short, picks}]}
     where = [{qty, label, container, place, elsewhere}]: the player's containers holding the ingredient
@@ -99,10 +100,26 @@ def stall_offers(stalls, wanted, me):
     return offers
 
 
+def stall_buildings(st, claim_inv):
+    """The claim buildings that are this stall. Deployable stands aren't buildings, so they have none."""
+    return [b for b in (claim_inv or {}).get('buildings', []) if str(b.get('entityId')) == str(st.get('entityId'))]
+
+
+def stall_label(st, claim_inv):
+    """How to spot a stall in town: its owner, type and nickname, or a deployable stand's own name."""
+    owner     = st.get('ownerName') or ''
+    buildings = stall_buildings(st, claim_inv)
+    if not buildings:
+        return st.get('nickname') or owner
+    name, nick = buildings[0].get('buildingName') or 'Stall', buildings[0].get('buildingNickname')
+    name = f'{name} ({nick})' if nick else name
+    return f"{owner}'s {name}" if owner else name
+
+
 def stall_stock(offer, claim_inv, owner_inv):
     """Units of the item the stall actually holds, or None if the stall's container wasn't found."""
     st, iid = offer['stall'], offer['key'][0]
-    buildings = [b for b in (claim_inv or {}).get('buildings', []) if str(b.get('entityId')) == str(st.get('entityId'))]
+    buildings = stall_buildings(st, claim_inv)
     if buildings:
         return sum((s.get('contents') or {}).get('quantity', 0) for b in buildings for s in b.get('inventory', [])
                    if str((s.get('contents') or {}).get('item_id')) == iid)
@@ -211,15 +228,16 @@ class Sources:
             self.claim_inv.update(zip(cids, pool.map(lambda c: fetch(f'/api/claims/{c}/inventories'), cids)))
             self.owner_inv.update(zip(owners, pool.map(lambda e: fetch(f'/api/players/{e}/inventories'), owners)))
         for o in offers:
-            st   = o['stall']
-            held = stall_stock(o, self.claim_inv.get(self.claim_id(st)), self.owner_inv.get(str(st.get('ownerEntityId'))))
+            st        = o['stall']
+            claim_inv = self.claim_inv.get(self.claim_id(st))
+            held = stall_stock(o, claim_inv, self.owner_inv.get(str(st.get('ownerEntityId'))))
             caps = [u for u in (held, None if o['trades'] is None else o['trades'] * o['bundle']) if u is not None]
             if not caps or min(caps) <= 0:
                 continue
             _, in_region, d = self.keep(st.get('regionId'), st.get('locationX'), st.get('locationZ'))
             self.add(o['key'], in_region, d, st.get('regionName') or '', bundle=o['bundle'], price=o['price'],
                      units=min(caps), claim=st['claimName'], source='stall',
-                     seller=st.get('nickname') or st.get('ownerName') or '', x=st.get('locationX'), z=st.get('locationZ'))
+                     seller=stall_label(st, claim_inv), x=st.get('locationX'), z=st.get('locationZ'))
 
     def in_region(self, key, units):
         return cheapest(units, [s for s in self.by_key.get(key, []) if s['in_region']])
