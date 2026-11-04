@@ -1,7 +1,10 @@
 'use strict';
 
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.12.0';
 const HEX = '⬡';
+// Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
+const STAND_NOTE = 'may not be there';
+const STAND_MARK = ' <span class="stand-mark">?</span>';
 
 const COLS = [
   { label: 'Traveler',         sort: 'traveler' },
@@ -401,6 +404,7 @@ function buildStallMap() {
       if (!map[it.id]) map[it.id] = [];
       map[it.id].push({
         name:        stall.name,
+        stand:       stall.stand || false,
         owner:       stall.owner,
         claimName:   stall.claimName,
         distance:    stall.distance,
@@ -514,17 +518,23 @@ function questItemPrice(n) {
   return { buy, cost, short: left, picks };
 }
 
+// "stall: sfmason's Sturdy Barter Stall (Rumbagh T1 5)"
+function sellerLine(s) {
+  return `${s.source}: ${s.seller}${s.stand ? ` — ${STAND_NOTE}` : ''}`;
+}
+
 // "30× for ⬡5,100 — Solvenar (522h), stall: sfmason's Sturdy Barter Stall (Rumbagh T1 5)"
 function pickLine(pk) {
   return `${pk.units.toLocaleString()}× for ${HEX}${pk.cost.toLocaleString()} — ${pk.claim}` +
-    `${pk.dist != null ? ` (${pk.dist.toLocaleString()}h)` : ''}, ${pk.source}: ${pk.seller}`;
+    `${pk.dist != null ? ` (${pk.dist.toLocaleString()}h)` : ''}, ${sellerLine(pk)}`;
 }
 
 // Where the price lookup bought from: "⬡5,100 Solvenar" or "⬡1,475 3 claims", then what's left unsold
 function boughtHtml(p, tip) {
   const claims = [...new Set(p.picks.map(pk => pk.claim))];
   let html = p.picks.length ? ` <span class="quest-price" data-tip="${esc(tip)}">${HEX}${p.cost.toLocaleString()}` +
-    ` <span class="sub">${esc(claims.length === 1 ? claims[0] : `${claims.length} claims`)}</span></span>` : '';
+    ` <span class="sub">${esc(claims.length === 1 ? claims[0] : `${claims.length} claims`)}</span>` +
+    `${p.picks.some(pk => pk.stand) ? STAND_MARK : ''}</span>` : '';
   if (p.short) html += ` <span class="quest-short" data-tip="${esc(tip)}">` +
     `${p.short === p.buy ? 'not for sale' : `${p.short.toLocaleString()} not for sale`}</span>`;
   return html;
@@ -684,11 +694,11 @@ function planQuestRoute() {
     }
     for (const [key, list] of byClaim) {
       let left = w.buy, cost = 0;
-      const from = new Set();
+      const from = [];
       for (const o of list.sort((a, b) => a.price / a.bundle - b.price / b.bundle)) {
         if (left <= 0) break;
         const trades = Math.min(Math.ceil(left / o.bundle), Math.floor(o.units / o.bundle));
-        if (trades > 0) from.add(`${o.source}: ${o.seller}`);
+        if (trades > 0) from.push(o);
         cost += trades * o.price;
         left -= trades * o.bundle;
       }
@@ -763,7 +773,7 @@ function routeHtml() {
   const which = plan.covered === plan.total ? `all ${plan.total}` : `${plan.covered} of ${plan.total}`;
   const help  = `Up to 3 stops, in any region within ${ROUTE_RADIUS_H.toLocaleString()}h. ` +
                 'Each item is bought at the stop that sells it cheapest. Best balance weighs travel against cost. ' +
-                'Hover a stop to see what to buy there.';
+                `Hover a stop to see what to buy there. ? means a Trader Stand, which can be moved, so it ${STAND_NOTE}.`;
   const when  = S.quests.some(q => q.status === 'next') ? 'now or next' : 'now';
   return `<div class="quest-route"><span class="route-head" data-tip="${esc(help)}">Shopping route for ${which} quests you can do ${when}:</span>${missing}` +
     plan.routes.map(r =>
@@ -772,10 +782,11 @@ function routeHtml() {
       r.stops.map((s, i) => {
         const subtotal = s.buys.reduce((sum, b) => sum + b.cost, 0);
         const tip = s.buys.map(b => `${b.buy.toLocaleString()}× ${b.name} — ${HEX}${b.cost.toLocaleString()} (${b.quest})\n` +
-                                    `    ${[...b.from].join(', ')}`)
+                                    `    ${[...new Set(b.from.map(sellerLine))].join(', ')}`)
           .concat(`Spend here: ${HEX}${subtotal.toLocaleString()}`).join('\n');
         const region = s.region && s.region !== S.questRegion ? `, ${s.region}` : '';
-        return `${i ? '<span class="sub">→</span>' : ''}<span class="route-stop" data-tip="${esc(tip)}">${i + 1}. ${esc(s.claim)}` +
+        const unsure = s.buys.some(b => b.from.some(o => o.stand)) ? STAND_MARK : '';
+        return `${i ? '<span class="sub">→</span>' : ''}<span class="route-stop" data-tip="${esc(tip)}">${i + 1}. ${esc(s.claim)}${unsure}` +
           `<span class="sub">${esc(region)} ${i ? '+' : ''}${s.leg.toLocaleString()}h</span></span>`;
       }).join('') +
       `</div>`
@@ -924,7 +935,8 @@ function renderRow(task) {
         : '';
       const watchedMark = m.watched ? `<span style="color:#f0a500" title="Watched">★ </span>` : '';
       const displayName = m.name !== m.owner && m.name ? m.name : m.owner;
-      return `${watchedMark}<span class="stall-name">${esc(displayName)}</span>${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
+      const standMark = m.stand ? `<span data-tip="Trader Stands can be moved, so this one ${STAND_NOTE}">${STAND_MARK}</span>` : '';
+      return `${watchedMark}<span class="stall-name">${esc(displayName)}</span>${standMark}${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
     });
     return lines.join('<br>');
   }).join('<br>');

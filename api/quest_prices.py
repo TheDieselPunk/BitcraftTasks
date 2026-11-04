@@ -7,13 +7,14 @@ For items the region can't supply in full, how to craft the rest: the recipe, th
 player still needs (player_id gives what they have) and where to buy those in the region.
 
 Returns:
-  - items: {id: {buy, cost, short, picks: [{units, cost, unit, claim, source, seller, dist}], craft?}}
+  - items: {id: {buy, cost, short, picks: [{units, cost, unit, claim, source, seller, stand, dist}], craft?}}
     short = units that can't be bought in the region; dist is in display units (raw / 3)
     seller = the market order's owner, or the stall to look for, like "sfmason's Sturdy Barter Stall (Rumbagh T1 5)"
+    stand = sold from a Trader Stand, which can be moved or packed away, so it may not be at the claim
     craft = {recipe, building, crafts, makes, levels: [{skill, level, have}],
              ingredients: [{id, type, name, qty, have, where, buy, cost, short, picks}]}
     where = [{qty, label, container, place, elsewhere}]: the player's containers holding the ingredient
-  - offers: {id: [{claim, region, x, z, price, bundle, units, source, seller}]}: every offer within
+  - offers: {id: [{claim, region, x, z, price, bundle, units, source, seller, stand}]}: every offer within
     ROUTE_RADIUS of the player in any region, for planning a shopping route (price is per bundle)
   - region: region name
 """
@@ -143,7 +144,7 @@ def cheapest(need, sources):
         cost += trades * s['price']
         left -= units
         picks.append({'units': units, 'cost': trades * s['price'], 'unit': round(s['price'] / s['bundle']),
-                      'claim': s['claim'], 'source': s['source'], 'seller': s['seller'], 'dist': s['dist']})
+                      'claim': s['claim'], 'source': s['source'], 'seller': s['seller'], 'stand': s['stand'], 'dist': s['dist']})
     return {'buy': need, 'cost': cost, 'short': max(0, left), 'picks': picks}
 
 
@@ -209,7 +210,7 @@ class Sources:
             except (KeyError, TypeError, ValueError):
                 continue
             self.add(key, in_region, d, o.get('regionName') or '', bundle=1, price=price, units=units,
-                     claim=o.get('claimName', ''), source='market', seller=o.get('ownerUsername') or '',
+                     claim=o.get('claimName', ''), source='market', seller=o.get('ownerUsername') or '', stand=False,
                      x=o.get('claimLocationX'), z=o.get('claimLocationZ'))
 
     def claim_id(self, st):
@@ -237,7 +238,8 @@ class Sources:
             _, in_region, d = self.keep(st.get('regionId'), st.get('locationX'), st.get('locationZ'))
             self.add(o['key'], in_region, d, st.get('regionName') or '', bundle=o['bundle'], price=o['price'],
                      units=min(caps), claim=st['claimName'], source='stall',
-                     seller=stall_label(st, claim_inv), x=st.get('locationX'), z=st.get('locationZ'))
+                     seller=stall_label(st, claim_inv), stand=bool(st.get('nickname')),   # only Trader Stands have one
+                     x=st.get('locationX'), z=st.get('locationZ'))
 
     def in_region(self, key, units):
         return cheapest(units, [s for s in self.by_key.get(key, []) if s['in_region']])
@@ -328,7 +330,7 @@ class handler(BaseHTTPRequestHandler):
                                    else {'cost': 0, 'short': 0, 'picks': []})
                     items[k[0]]['craft'] = p
 
-            route_fields = ('claim', 'region', 'x', 'z', 'price', 'bundle', 'units', 'source', 'seller')
+            route_fields = ('claim', 'region', 'x', 'z', 'price', 'bundle', 'units', 'source', 'seller', 'stand')
             self._send(200, {
                 'items':    items,
                 'offers':   {k[0]: [{f: s[f] for f in route_fields} for s in src.by_key.get(k, [])

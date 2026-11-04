@@ -168,6 +168,7 @@ class handler(BaseHTTPRequestHandler):
 
                 entry = {
                     'name':          nickname or owner or 'Stall',
+                    'stand':         bool(nickname),   # only Trader Stands have a nickname here
                     'owner':         owner,
                     'ownerEntityId': stall.get('ownerEntityId', '') or '',
                     'stallEntityId': stall.get('entityId', '') or '',
