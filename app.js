@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.13.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -851,8 +851,10 @@ function decorateTask(task, stallMap) {
     return { ...item, stall_matches: nearby };
   });
 
-  // Cost: cheapest coin price (barter sources have no coin cost — excluded)
-  let totalCost = 0, costKnown = true;
+  // Cost: every item at its cheapest coin price (barter sources have no coin cost — excluded).
+  // Items you already own count at that price too: handing them in means not selling them.
+  let buyCost = 0, ownedValue = 0, costKnown = true;
+  const unpriced = [];
   for (const item of items) {
     const candidates = [];
     if (item.market_price != null) candidates.push(item.market_price);
@@ -861,15 +863,35 @@ function decorateTask(task, stallMap) {
       const sp = hexPrice(m.price_parts);
       if (sp != null) candidates.push(sp);
     }
-    const buyQty = Math.max(0, item.qty - (item.inv_have || 0));
-    if (candidates.length) totalCost += Math.min(...candidates) * buyQty;
-    else if (buyQty > 0) costKnown = false;
+    const ownQty = Math.min(item.qty, item.inv_have || 0);
+    const buyQty = item.qty - ownQty;
+    item.unit_price = candidates.length ? Math.min(...candidates) : null;
+    if (item.unit_price != null) {
+      buyCost    += item.unit_price * buyQty;
+      ownedValue += item.unit_price * ownQty;
+    } else if (buyQty > 0) costKnown = false;
+    else unpriced.push(item.name);
   }
   const hasSource = items.some(i => i.stall_matches.length > 0 || i.market_price != null);
-  const cost   = costKnown && hasSource ? totalCost : null;
+  const known  = costKnown && hasSource;
+  const cost   = known ? buyCost + ownedValue : null;
   const profit = cost != null ? task.reward - cost : null;
 
-  return { ...task, items, cost, profit };
+  return { ...task, items, cost, profit, buyCost: known ? buyCost : null, ownedValue: known ? ownedValue : null, unpriced };
+}
+
+// The Cost cell: the total, plus how much of it is your own items, which you'd otherwise sell
+function costHtml(task) {
+  if (task.cost == null) return `<span class="dim">—</span>`;
+  const total = `${HEX} ${task.cost.toLocaleString()}`;
+  if (!task.ownedValue && !task.unpriced.length) return total;
+  const tip = [
+    task.buyCost    ? `${HEX}${task.buyCost.toLocaleString()} to buy` : '',
+    task.ownedValue ? `${HEX}${task.ownedValue.toLocaleString()} worth of your own items, at the cheapest price nearby` : '',
+    ...task.unpriced.map(n => `${n}: yours, but no price found, so counted as free`),
+  ].filter(Boolean).join('\n');
+  const yours = task.ownedValue ? `${HEX}${task.ownedValue.toLocaleString()} yours` : 'yours, no price';
+  return `<span data-tip="${esc(tip)}">${total}<div class="sub">${yours}</div></span>`;
 }
 
 function sortVal(task) {
@@ -928,8 +950,11 @@ function renderRow(task) {
       }
       const ph        = priceHtml(m.price_parts);
       const coinPrice = hexPrice(m.price_parts);
-      const buyQty    = Math.max(0, item.qty - (item.inv_have || 0));
-      const profit    = coinPrice != null ? task.reward - coinPrice * buyQty : null;
+      // Buy the rest here; what you own still counts at its cheapest price, since you could sell it
+      const ownQty    = Math.min(item.qty, item.inv_have || 0);
+      const profit    = coinPrice != null
+        ? task.reward - coinPrice * (item.qty - ownQty) - (item.unit_price ?? coinPrice) * ownQty
+        : null;
       const profitStr = profit != null
         ? ` <span class="${profit >= 0 ? 'profit-pos' : 'profit-neg'}">(${HEX}${profit.toLocaleString()})</span>`
         : '';
@@ -980,7 +1005,7 @@ function renderRow(task) {
     return `<span class="craft-no" data-tip="${tip}">✗${bld}</span>`;
   }).join('<br>');
 
-  const costStr    = task.cost   != null ? `${HEX} ${task.cost.toLocaleString()}`   : `<span class="dim">—</span>`;
+  const costStr    = costHtml(task);
   const profitStr  = task.profit != null ? `${HEX} ${task.profit.toLocaleString()}` : `<span class="dim">—</span>`;
   const profitCls  = task.profit == null ? '' : task.profit >= 0 ? ' profit-pos' : ' profit-neg';
 
