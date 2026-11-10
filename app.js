@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.13.0';
+const APP_VERSION = '1.14.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -35,6 +35,7 @@ const S = {
   questPrices:   null,   // {item_id: {buy, cost, short, picks, craft?}}, or 'loading'
   questRegion:   '',
   questOffers:   null,   // {item_id: [offer]} from any region near the player, for the shopping route
+  recommend:     null,   // {claims, pool, ready, total, range} from /api/recommend, or {loading: true}
   tasksLoaded:   false,
   stallsLoaded:  false,
   resetTimer:    null,
@@ -61,6 +62,7 @@ let   claimNameMap  = {};   // name → id
 const resetCd       = $('reset-cd');
 const creditsSection = $('credits-section');
 const questsSection = $('quests-section');
+const recSection    = $('recommend-section');
 const expSection    = $('exp-section');
 const watchRow      = $('watch-row');
 const watchInput    = $('watch-input');
@@ -188,7 +190,7 @@ marketRange.addEventListener('input', () => {
   rangeVal.textContent = S.marketRangeH === 0 ? '0h' : `${S.marketRangeH}h`;
   localStorage.setItem('bcTasks_marketRange', S.marketRangeH);
   clearTimeout(_rangeDebounce);
-  _rangeDebounce = setTimeout(() => { if (S.player) loadTasks(); }, 600);
+  _rangeDebounce = setTimeout(() => { if (S.player) { loadTasks(); loadRecommend(); } }, 600);
 });
 
 // ── Tooltip ────────────────────────────────────────────────────────────────────
@@ -274,6 +276,7 @@ async function load() {
   emptyMsg.textContent = '';
   mainTbl.style.display = 'none';
 
+  loadRecommend();   // slower than the rest and not needed for the table, so it fills in when it's ready
   await Promise.all([
     loadTasks(),
     S.player.locationX != null ? loadStalls() : Promise.resolve(),
@@ -494,6 +497,110 @@ function renderCredits() {
       return `<span class="exp-chip"><span class="exp-skill">${esc(c.traveler)}</span><span class="${low ? 'credit-low' : 'exp-amt'}">${c.credits}${max}</span></span>`;
     }).join('') +
     (S.rerollCost != null ? `<span class="sub">Reroll costs ${S.rerollCost}</span>` : '');
+}
+
+// ── Claim recommendation ──────────────────────────────────────────────────────
+// The claims, anywhere in the world, whose markets cover the most of the tasks the player can be given:
+// every task in the tiers they've unlocked, since rerolls and new tasks draw from that pool
+async function loadRecommend() {
+  const p = S.player;
+  const params = [`player_id=${encodeURIComponent(p.id)}`, `username=${encodeURIComponent(p.username)}`, `range=${S.marketRangeH}`];
+  if (p.regionId)          params.push(`regionId=${p.regionId}`);
+  if (p.locationX != null) params.push(`x=${p.locationX}`, `z=${p.locationZ}`);
+  const mine = S.recommend = { loading: true };
+  renderRecommend();
+  try {
+    const data = await apiFetch(`/api/recommend?${params.join('&')}`);
+    if (S.recommend !== mine) return;   // a newer load replaced this one
+    S.recommend = data;
+    showWarnings(data.warnings);
+  } catch (err) {
+    if (S.recommend !== mine) return;
+    S.recommend = null;
+    showWarnings([`Claim recommendation: ${err.message}`]);
+  }
+  renderRecommend();
+}
+
+// How much of each traveler's task pool a claim covers
+function coverTip(c) {
+  return c.travelers.map(t => `${t.traveler}: ${t.covered} of ${t.total}`)
+    .concat(`Combined profit if you did each once: ${HEX}${c.pool_profit.toLocaleString()}`).join('\n');
+}
+
+// What to buy at a recommended claim for the tasks held now, task by task, then the ones it can't help with
+function recommendTip(c) {
+  const lines = !c.tasks.length ? ['Nothing here for the tasks you hold now.'] : c.tasks.map(t =>
+    `${t.traveler}: +${HEX}${t.profit.toLocaleString()} (pays ${HEX}${t.reward.toLocaleString()}, costs ${HEX}${t.spend.toLocaleString()})\n` +
+    t.items.map(i => {
+      const own  = i.own ? `${i.own.toLocaleString()} yours` : '';
+      const from = i.from.map(f => `${f.units.toLocaleString()} for ${HEX}${f.cost.toLocaleString()}${f.claim !== c.name ? ` in ${f.claim}` : ''}` +
+        `${f.stall ? ` from ${f.stall}${f.stand ? ` (${STAND_NOTE})` : ''}` : ''}`);
+      return `    ${i.qty.toLocaleString()}× ${i.name} — ${[own, ...from].filter(Boolean).join(', ')}`;
+    }).join('\n'));
+  const more = list => list.slice(0, 6).map(n => `    ${n}`).concat(list.length > 6 ? [`    … and ${list.length - 6} more`] : []);
+  if (c.costly.length)      lines.push('Costs more than it pays here:', ...more(c.costly));
+  if (c.unavailable.length) lines.push('Not for sale here:', ...more(c.unavailable));
+  return lines.join('\n');
+}
+
+function useClaim(id) {
+  const c = S.allClaims.find(c => c.id === id);
+  if (!c) return;
+  const label = `${c.name} (${c.dist}h)`;
+  S.selectedClaimId = id;
+  claimInput.value  = label;
+  localStorage.setItem('bcTasks_selectedClaim', id);
+  localStorage.setItem('bcTasks_selectedClaimName', label);
+  load();
+}
+
+function renderRecommend() {
+  const r = S.recommend;
+  if (!r) { recSection.innerHTML = ''; return; }
+  const head = `<div class="exp-label">Best claim to do your tasks at:</div>`;
+  if (r.loading) { recSection.innerHTML = head + `<span class="dim">checking markets in every region…</span>`; return; }
+  const where = r.range ? `markets and stalls within ${r.range}h of it` : 'its market and stalls';
+  const pool  = r.pool?.total ?? 0;
+  const help  = `Claims in any region, ranked by how many of the tasks you can be given are covered by ${where}.\n` +
+                `That's every task in the tiers you've unlocked (${pool + (r.pool?.own ?? 0)}), not just the ${r.total} you hold now,\n` +
+                `so the claim stays a good place to be after rerolls and new tasks. ${r.pool?.own ?? 0} of them your own items already cover.\n` +
+                'A task is covered where every item you lack is for sale and costs less than the task pays.\n' +
+                'Your own items are used first and not counted as a cost.\n' +
+                'Counts market orders and stalls that sell for Hex Coin; stall stock is checked for the claims shown.\n' +
+                'Raise Market range to include neighbouring markets. Hover the numbers for details.';
+  const ready = r.ready?.count
+    ? `<div class="rec-row"><span class="rec-label">No shopping</span><span class="inv-ok">` +
+      `${r.ready.count} task${r.ready.count === 1 ? '' : 's'} you can hand in with what you have, for ${HEX}${r.ready.reward.toLocaleString()}</span></div>`
+    : '';
+  if (!r.claims.length) {
+    recSection.innerHTML = head + ready + `<div class="rec-row"><span class="quest-short">No market sells what your tasks need for less than they pay.</span></div>`;
+    return;
+  }
+  const myRegion = String(S.player?.regionId ?? '');
+  const top      = r.claims[0].covered;
+  recSection.innerHTML =
+    `<div class="exp-label"><span data-tip="${esc(help)}" style="cursor:default;border-bottom:1px dotted #444466">Best claim to do your tasks at</span> <span class="sub">(${pool} possible tasks that need shopping, buying at ${where})</span>:</div>` +
+    ready +
+    r.claims.map((c, i) => {
+      const local  = String(c.regionId) === myRegion;
+      const label  = i === 0 ? 'Most tasks' : c.covered === top ? 'As many'
+                   : local && !r.claims.slice(0, i).some(o => String(o.regionId) === myRegion) ? 'Best in region' : `#${i + 1}`;
+      const others = c.markets.filter(m => m !== c.name);
+      const near   = others.length ? `<span class="sub">+ ${esc(others.join(', '))}</span>` : '';
+      const use    = S.allClaims.some(a => a.id === c.claimId) && c.claimId !== S.selectedClaimId
+        ? `<button class="rec-use" onclick='useClaim(${JSON.stringify(c.claimId)})' title="Show this claim's prices in the table">Use as market</button>` : '';
+      return `<div class="rec-row${i === 0 ? ' rec-best' : ''}">` +
+        `<span class="rec-label">${label}</span>` +
+        `<span class="rec-claim">${esc(c.name)}</span>${near}` +
+        `<span class="sub">${esc(c.region)}${local ? ' (your region)' : ''}${c.dist != null ? ` · ${c.dist.toLocaleString()}h away` : ''}</span>` +
+        `<span class="rec-cover" data-tip="${esc(coverTip(c))}">${c.covered} of ${pool} possible tasks</span>` +
+        `<span class="quest-have" data-tip="${esc(recommendTip(c))}">now: ${c.tasks.length} of your ${r.total - (r.ready?.count ?? 0)}` +
+        `${c.tasks.length ? ` for <span class="profit-pos">+${HEX}${c.profit.toLocaleString()}</span>` : ''}</span>` +
+        use +
+      `</div>`;
+    }).join('');
+  bindTips(recSection);
 }
 
 // ── Unlock quests ─────────────────────────────────────────────────────────────

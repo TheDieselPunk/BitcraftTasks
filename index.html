@@ -183,6 +183,18 @@
     #quests-section { padding: 4px 20px 8px; font-size: .75rem; }
     #quests-section:empty { display: none; }
     #quests-section .exp-label { display: block; margin-bottom: 4px; }
+    #recommend-section { padding: 4px 20px 8px; font-size: .75rem; }
+    #recommend-section:empty { display: none; }
+    #recommend-section .exp-label { display: block; margin-bottom: 4px; }
+    .rec-row    { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid #111128; }
+    .rec-label  { min-width: 92px; font-size: .65rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #666688; }
+    .rec-best .rec-label { color: #52c46a; }
+    .rec-claim  { color: #b47cff; font-weight: 800; }
+    .rec-best .rec-claim { color: #f0a500; }
+    .rec-cover  { color: #52c46a; font-weight: 800; cursor: default; }
+    .rec-use    { background: none; border: 1px solid #2a2a5a; border-radius: 4px; color: #666688; font-size: .62rem;
+                  font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding: 1px 6px; cursor: pointer; }
+    .rec-use:hover { border-color: #f0a500; color: #f0a500; }
     .quest-row    { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid #111128; }
     .quest-status { min-width: 92px; font-size: .65rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; }
     .quest-trav   { color: #f0a500; font-weight: 800; min-width: 70px; }
@@ -344,6 +356,7 @@
 
   <div id="api-warnings"></div>
   <div id="credits-section"></div>
+  <div id="recommend-section"></div>
   <div id="quests-section"></div>
   <div id="exp-section"></div>
 
