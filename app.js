@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.14.0';
+const APP_VERSION = '1.14.1';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -225,7 +225,7 @@ async function doSearch() {
     psName.textContent = data.username;
     const parts = [];
     if (data.locationX != null) parts.push(`N ${Math.round(data.locationZ / 3)}, E ${Math.round(data.locationX / 3)}`);
-    if (data.regionId)          parts.push(`Region ${data.regionId}`);
+    if (data.regionId)          parts.push(data.regionName || `Region ${data.regionId}`);
     psDetail.textContent = parts.join(' · ');
 
     if (data.allClaims?.length) {

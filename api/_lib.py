@@ -37,7 +37,7 @@ def cors_headers():
 def get_player(username):
     """
     Two-step lookup: search by username → full profile for position.
-    Returns {id, username, locationX, locationZ, regionId,
+    Returns {id, username, locationX, locationZ, regionId, regionName,
              nearestClaimName, nearestClaimId, nearestClaimDist, allClaims} or None.
     """
     data    = api_get('/api/players', {'q': username, 'limit': 5})
@@ -56,9 +56,26 @@ def get_player(username):
     z         = p.get('locationZ')
     region_id = p.get('regionId')
 
-    nearest, all_claims = get_claims(x, z, region_id) if x is not None else (None, [])
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        claims_f  = pool.submit(get_claims, x, z, region_id) if x is not None else None
+        towns_f   = pool.submit(get_market_towns, x, z, region_id) if x is not None else None
+        regions_f = pool.submit(api_get, '/api/regions') if region_id else None
+        nearest, all_claims = claims_f.result() if claims_f else (None, [])
+        # The ruined cities aren't in the claims list, so add them and re-pick the nearest
+        listed = {c['id'] for c in all_claims}
+        towns  = [t for t in (towns_f.result() if towns_f else []) if t['id'] not in listed]
+        if towns:
+            all_claims = sorted(all_claims + towns, key=lambda c: c['dist'])
+            n = all_claims[0]
+            nearest = {'entityId': n['id'], 'name': n['name'], 'distance': n['dist']}
+        try:
+            regions = regions_f.result() if regions_f else []
+        except Exception:
+            regions = []
+    region_name = next((r.get('regionName') for r in regions if str(r.get('regionId')) == str(region_id)), None)
 
     return {
+        'regionName':       region_name,
         'id':               player_id,
         'username':         p.get('username', username),
         'locationX':        x,
@@ -123,6 +140,46 @@ def get_claims(x, z, region_id):
         return nearest, all_claims
     except Exception:
         return None, []
+
+
+MARKET_SAMPLE = 40   # how many traded items to read orders of when looking for market towns
+
+
+def get_market_towns(x, z, region_id):
+    """
+    Claims with a market that /api/claims leaves out: the neutral ruined cities (Emberfall, Amberfield, ...).
+    BitJita has no list of them, so they're read off the orders of a spread of traded items: any town
+    with a working market turns up there. Returns [{id, name, dist, x, z}] like get_claims, unsorted.
+    """
+    try:
+        traded = api_get('/api/market', {'hasOrders': 'true'}).get('data', {}).get('items', [])
+        traded = [i for i in traded if i.get('hasOrders')]
+        step   = max(1, len(traded) // MARKET_SAMPLE)
+        sample = traded[::step][:MARKET_SAMPLE]
+
+        def orders(item):
+            kind = 'cargo' if item.get('itemType') == 1 else 'item'
+            try:
+                d = api_get(f'/api/market/{kind}/{item["id"]}')
+            except Exception:
+                return []
+            return (d.get('sellOrders') or []) + (d.get('buyOrders') or [])
+
+        towns = {}
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            for found in pool.map(orders, sample):
+                for o in found:
+                    cid, nm = o.get('claimEntityId'), o.get('claimName')
+                    cx, cz  = o.get('claimLocationX'), o.get('claimLocationZ')
+                    if not cid or not nm or cx is None or cz is None or str(cid) in towns:
+                        continue
+                    if region_id and str(o.get('regionId')) != str(region_id):
+                        continue
+                    towns[str(cid)] = {'id': str(cid), 'name': nm, 'dist': round(distance(x, z, cx, cz) / 3),
+                                       'x': float(cx), 'z': float(cz)}
+        return list(towns.values())
+    except Exception:
+        return []
 
 
 def get_nearest_claim(x, z, region_id):
