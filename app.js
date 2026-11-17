@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.17.0';
+const APP_VERSION = '1.18.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -8,11 +8,9 @@ const STAND_MARK = ' <span class="stand-mark">?</span>';
 
 const COLS = [
   { label: 'Traveler',         sort: 'traveler' },
-  { label: 'Items',            sort: null        },
-  { label: 'My Inventory',     sort: null        },
-  { label: 'Nearby Stalls',    sort: null        },
-  { label: 'Claim Market',     sort: null        },
-  { label: 'Craftable',        sort: null        },
+  { label: 'Item',             sort: null        },
+  { label: 'Have',             sort: null        },
+  { label: 'Where to get it',  sort: null        },
   { label: `Reward ${HEX}`,   sort: 'reward'    },
   { label: `Cost ${HEX}`,     sort: 'cost'      },
   { label: `Profit ${HEX}`,   sort: 'profit'    },
@@ -1059,6 +1057,8 @@ function render() {
   let tasks = [...S.tasks].map(t => decorateTask(t, stallMap));
 
   tasks.sort((a, b) => {
+    const sa = STATUS_RANK[taskStatus(a)], sb = STATUS_RANK[taskStatus(b)];
+    if (sa !== sb) return sa - sb;
     const va = sortVal(a), vb = sortVal(b);
     if (va == null && vb == null) return 0;
     if (va == null) return 1;
@@ -1157,120 +1157,126 @@ function isCompletable(task) {
 }
 
 // ── Row renderer ──────────────────────────────────────────────────────────────
-function renderRow(task) {
-  // Items column
-  const itemsHtml = task.items.map(i => {
-    const tag = i.type === 'cargo' ? ` <span class="type-tag">cargo</span>` : '';
-    return `<span class="qty">${i.qty.toLocaleString()}×</span> ${esc(i.name)}${tag}`;
-  }).join('<br>');
+// One table row per item, so each item's sources sit right beside it; the task's own cells (traveler,
+// reward, cost, profit) span its items.
 
-  // Inventory column
-  const invHtml = task.items.map(item => {
-    if (!item.inv_have) return `<span class="dim">—</span>`;
-    const cls = item.inv_have >= item.qty ? 'inv-ok' : 'inv-part';
-    const locs = (item.inv_locations || [])
-      .map(l => `${l.qty.toLocaleString()} in ${l.label}`)
-      .join('\n');
-    const tipText = `${item.inv_have.toLocaleString()} / ${item.qty.toLocaleString()} needed${locs ? '\n' + locs : ''}` +
-                    (item.inv_have_live ? '\n(live count; the breakdown is from the last refresh)' : '');
-    return `<span class="${cls}" data-tip="${esc(tipText)}">${item.inv_have.toLocaleString()}</span>`;
-  }).join('<br>');
+// ready: everything's in hand. buyable: every item has a full source. missing: some item has none.
+function taskStatus(task) {
+  if (task.items.every(i => (i.inv_have || 0) >= i.qty)) return 'ready';
+  return isCompletable(task) ? 'buyable' : 'missing';
+}
+const STATUS_RANK  = { ready: 0, buyable: 1, missing: 2 };
+const STATUS_LABEL = { ready: 'Ready to hand in', buyable: 'Can get it all', missing: 'Missing a source' };
 
-  // Nearby stalls column
-  const stallHtml = task.items.map(item => {
-    if (!S.stallsLoaded) return '<span class="dim">⏳</span>';
-    const matches = item.stall_matches || [];
-    if (!matches.length) return `<span class="na">—</span>`;
-    const lines = matches.map(m => {
-      if (m.isHousing) {
-        return `<span class="housing-name">${esc(m.name)}</span> <span class="sub">(${esc(m.storageLabel)})</span>`;
-      }
-      const distStr   = m.distance != null
-        ? `<span class="sub">${Math.round(m.distance / 3).toLocaleString()}h</span>`
-        : `<span class="sub dim">?h</span>`;
-      if (m.isBarter) {
-        const claimStr = m.claimName ? ` <span class="sub">(${esc(m.claimName)} · Barter Stall)</span>` : ` <span class="sub">(Barter Stall)</span>`;
-        return `<span class="stall-name">${esc(m.name)}</span>${claimStr} <span class="sub profit-neutral">(⬡?)</span> ${distStr}`;
-      }
-      const ph        = priceHtml(m.price_parts);
-      const coinPrice = hexPrice(m.price_parts);
-      // Buy the rest here; what you own still counts at its cheapest price, since you could sell it
-      const ownQty    = Math.min(item.qty, item.inv_have || 0);
-      const profit    = coinPrice != null
-        ? task.reward - coinPrice * (item.qty - ownQty) - (item.unit_price ?? coinPrice) * ownQty
-        : null;
-      const profitStr = m.partial
-        ? ` <span class="stock-short" data-tip="${esc(`Only ${m.stock.toLocaleString()} in stock; you need ${(item.qty - ownQty).toLocaleString()} more`)}">only ${m.stock.toLocaleString()} left</span>`
-        : profit != null
-        ? ` <span class="${profit >= 0 ? 'profit-pos' : 'profit-neg'}">(${HEX}${profit.toLocaleString()})</span>`
-        : '';
-      const displayName = m.name !== m.owner && m.name ? m.name : m.owner;
-      const standMark = !m.stand ? ''
-        : m.liveSpot ? `<span class="stand-live" data-tip="${esc(`Live: set up at N ${Math.round(m.liveSpot.z / 3)}, E ${Math.round(m.liveSpot.x / 3)}` +
-                         `, ${m.liveSpot.stock.toLocaleString()} in stock`)}">●</span>`
-        : `<span data-tip="Trader Stands can be moved, so this one ${STAND_NOTE}">${STAND_MARK}</span>`;
-      return `<span class="stall-name">${esc(displayName)}</span>${standMark}${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
-    });
-    return lines.join('<br>');
-  }).join('<br>');
+function haveHtml(item) {
+  if (!item.inv_have) return `<span class="dim">—</span>`;
+  const cls  = item.inv_have >= item.qty ? 'inv-ok' : 'inv-part';
+  const locs = (item.inv_locations || []).map(l => `${l.qty.toLocaleString()} in ${l.label}`).join('\n');
+  const tip  = `${item.inv_have.toLocaleString()} / ${item.qty.toLocaleString()} needed${locs ? '\n' + locs : ''}` +
+               (item.inv_have_live ? '\n(live count; the breakdown is from the last refresh)' : '');
+  return `<span class="${cls}" data-tip="${esc(tip)}">${item.inv_have.toLocaleString()}</span>`;
+}
 
-  // Market price column
-  const marketHtml = task.items.map(item => {
-    if (!S.tasksLoaded) return '<span class="dim">⏳</span>';
-    const prices = item.market_prices;
-    if (prices && prices.length > 0) {
-      if (S.marketRangeH > 0) {
-        // Multi-claim: show each price with claim name, sorted ascending
-        return prices.map(mp => {
-          const unit  = mp.price.toLocaleString();
-          const total = (mp.price * item.qty).toLocaleString();
-          const claim = mp.claimName ? ` <span class="sub">(${esc(mp.claimName)})</span>` : '';
-          return `<span class="market-price">${HEX}${unit}</span>${claim} <span class="sub">(${HEX}${total})</span>`;
-        }).join('<br>');
-      } else {
-        const mp    = prices[0];
-        const unit  = mp.price.toLocaleString();
-        const total = (mp.price * item.qty).toLocaleString();
-        return `<span class="market-price">${HEX}${unit}</span> <span class="sub">(${HEX}${total})</span>`;
-      }
+function distHtml(d) {
+  return d != null ? `<span class="sub">${Math.round(d / 3).toLocaleString()}h</span>` : `<span class="sub dim">?h</span>`;
+}
+
+// Every place to get an item, best first: {order, html}. order sorts full sources by unit price, then
+// partial stock, then barter stalls, housing and crafting.
+function itemSources(task, item) {
+  const out    = [];
+  const ownQty = Math.min(item.qty, item.inv_have || 0);
+  const toBuy  = item.qty - ownQty;
+  const tag    = (cls, label) => `<span class="src-tag src-${cls}">${label}</span>`;
+
+  for (const m of (item.stall_matches || [])) {
+    if (m.isHousing) {
+      out.push({ order: 3e9, html: `${tag('house', 'Housing')} <span class="housing-name">${esc(m.name)}</span> <span class="sub">(${esc(m.storageLabel)})</span>` });
+      continue;
     }
-    if (item.market_price == null) return `<span class="dim">not listed</span>`;
-    const unit  = item.market_price.toLocaleString();
-    const total = (item.market_price * item.qty).toLocaleString();
-    return `<span class="market-price">${HEX}${unit}</span> <span class="sub">(${HEX}${total})</span>`;
-  }).join('<br>');
+    if (m.isBarter) {
+      const claim = m.claimName ? ` <span class="sub">(${esc(m.claimName)})</span>` : '';
+      out.push({ order: 2e9, html: `${tag('barter', 'Barter')} <span class="stall-name">${esc(m.name)}</span>${claim} ${distHtml(m.distance)}` });
+      continue;
+    }
+    const coin   = hexPrice(m.price_parts);
+    const profit = coin != null ? task.reward - coin * toBuy - (item.unit_price ?? coin) * ownQty : null;
+    const note   = m.partial
+      ? ` <span class="stock-short" data-tip="${esc(`Only ${m.stock.toLocaleString()} in stock; you need ${toBuy.toLocaleString()}`)}">only ${m.stock.toLocaleString()} left</span>`
+      : profit != null ? ` <span class="${profit >= 0 ? 'profit-pos' : 'profit-neg'}" data-tip="Task profit buying here">(${HEX}${profit.toLocaleString()})</span>` : '';
+    const name  = m.name !== m.owner && m.name ? m.name : m.owner;
+    const mark  = !m.stand ? ''
+      : m.liveSpot ? `<span class="stand-live" data-tip="${esc(`Live: set up at N ${Math.round(m.liveSpot.z / 3)}, E ${Math.round(m.liveSpot.x / 3)}, ${m.liveSpot.stock.toLocaleString()} in stock`)}">●</span>`
+      : `<span data-tip="Trader Stands can be moved, so this one ${STAND_NOTE}">${STAND_MARK}</span>`;
+    const ph    = priceHtml(m.price_parts);
+    out.push({
+      order: m.partial ? 1e9 + (coin ?? 0) : (coin ?? 5e8),
+      html:  `${tag('stall', m.stand ? 'Stand' : 'Stall')} <span class="stall-name">${esc(name)}</span>${mark}${ph ? ' · ' + ph : ''}${note} ${distHtml(m.distance)}`,
+    });
+  }
 
-  // Craftable column
-  const craftHtml = task.items.map(item => {
-    const ci = item.craft_info;
-    if (!ci || ci.status === 'none') return `<span class="craft-no">—</span>`;
-    const tip = (ci.details || []).map(d =>
-      `${esc(d.name)}: ${d.have.toLocaleString()} / ${d.need.toLocaleString()}`
-    ).join('\n');
+  const markets = item.market_prices?.length ? item.market_prices
+    : item.market_price != null ? [{ price: item.market_price, claimName: S.allClaims.find(c => c.id === S.selectedClaimId)?.name || '' }] : [];
+  for (const mp of markets) {
+    const claim = mp.claimName ? ` <span class="stall-name">${esc(mp.claimName)}</span>` : '';
+    out.push({
+      order: mp.price,
+      html:  `${tag('market', 'Market')}${claim} · <span class="market-price">${HEX}${mp.price.toLocaleString()}/u</span> <span class="sub">(${HEX}${(mp.price * toBuy).toLocaleString()} for ${toBuy.toLocaleString()})</span>`,
+    });
+  }
+
+  const ci = item.craft_info;
+  if (ci && ci.status && ci.status !== 'none' && ci.status !== 'no') {
+    const tip = (ci.details || []).map(d => `${d.name}: ${d.have.toLocaleString()} / ${d.need.toLocaleString()}`).join('\n');
     const bld = ci.building ? ` <span class="sub">(${esc(ci.building)})</span>` : '';
-    if (ci.status === 'yes')     return `<span class="craft-ok" data-tip="${tip}">✓${bld}</span>`;
-    if (ci.status === 'partial') return `<span class="inv-part" data-tip="${tip}">~${bld}</span>`;
-    return `<span class="craft-no" data-tip="${tip}">✗${bld}</span>`;
-  }).join('<br>');
+    const how = ci.status === 'yes' ? '<span class="craft-ok">you have the materials</span>' : '<span class="inv-part">some materials</span>';
+    out.push({ order: 4e9, html: `<span data-tip="${esc(tip)}">${tag('craft', 'Craft')} ${how}${bld}</span>` });
+  }
+  return out.sort((a, b) => a.order - b.order);
+}
 
-  const costStr    = costHtml(task);
-  const profitStr  = task.profit != null ? `${HEX} ${task.profit.toLocaleString()}` : `<span class="dim">—</span>`;
-  const profitCls  = task.profit == null ? '' : task.profit >= 0 ? ' profit-pos' : ' profit-neg';
+const SOURCES_SHOWN = 3;
+function sourcesHtml(task, item) {
+  if ((item.inv_have || 0) >= item.qty) {
+    const where = item.inv_locations?.[0]?.label;
+    return `<span class="src-have">✓ You have ${item.qty > 1 ? 'them' : 'it'}</span>${where ? ` <span class="sub">(${esc(where)}${item.inv_locations.length > 1 ? ' +' + (item.inv_locations.length - 1) : ''})</span>` : ''}`;
+  }
+  if (!S.stallsLoaded && !item.market_price && !item.market_prices?.length) return '<span class="dim">⏳</span>';
+  const all = itemSources(task, item);
+  if (!all.length) return `<span class="src-none">No source found nearby</span>`;
+  const lines = all.map(s => `<div class="src-line">${s.html}</div>`);
+  const more  = lines.length - SOURCES_SHOWN;
+  return lines.slice(0, SOURCES_SHOWN).join('') +
+    (more > 0 ? `<details class="src-more"><summary>+${more} more</summary>${lines.slice(SOURCES_SHOWN).join('')}</details>` : '');
+}
 
+function renderRow(task) {
+  const n      = task.items.length;
+  const status = taskStatus(task);
+  const missing = status === 'missing'
+    ? task.items.filter(i => (i.inv_have || 0) < i.qty && !itemSources(task, i).some(s => s.order < 1e9)).map(i => i.name) : [];
   const lvlStr = task.min_level > 1 ? ` Lv ${task.min_level}+` : '';
   const expStr = task.exp_qty ? ` · ${task.exp_qty.toLocaleString()} xp` : '';
+  const profitStr = task.profit != null ? `${HEX} ${task.profit.toLocaleString()}` : `<span class="dim">—</span>`;
+  const profitCls = task.profit == null ? '' : task.profit >= 0 ? ' profit-pos' : ' profit-neg';
+  const statusTip = status === 'missing' ? `No full source nearby for: ${missing.join(', ')}` : STATUS_LABEL[status];
+  const span = `rowspan="${n}"`;
 
-  return `<tr class="task-row">
-    <td class="c-traveler">${esc(task.traveler)}<div class="traveler-sub">${esc(task.skill_name)}${lvlStr}${expStr}</div></td>
-    <td class="c-items">${itemsHtml}</td>
-    <td class="c-inv">${invHtml}</td>
-    <td class="c-stalls">${stallHtml}</td>
-    <td class="c-market">${marketHtml}</td>
-    <td class="c-craft">${craftHtml}</td>
-    <td class="c-num">${HEX} ${task.reward.toLocaleString()}</td>
-    <td class="c-num">${costStr}</td>
-    <td class="c-num${profitCls}">${profitStr}</td>
-  </tr>`;
+  return task.items.map((item, i) => {
+    const tag   = item.type === 'cargo' ? ` <span class="type-tag">cargo</span>` : '';
+    const first = i === 0 ? `
+      <td class="c-traveler" ${span}>${esc(task.traveler)}<div class="traveler-sub">${esc(task.skill_name)}${lvlStr}${expStr}</div>
+        <div class="task-status status-${status}" data-tip="${esc(statusTip)}">${STATUS_LABEL[status]}</div></td>` : '';
+    const last  = i === 0 ? `
+      <td class="c-num" ${span}>${HEX} ${task.reward.toLocaleString()}</td>
+      <td class="c-num" ${span}>${costHtml(task)}</td>
+      <td class="c-num${profitCls}" ${span}>${profitStr}</td>` : '';
+    return `<tr class="task-row status-row-${status}${i === 0 ? ' task-first' : ''}">${first}
+      <td class="c-items"><span class="qty">${item.qty.toLocaleString()}×</span> ${esc(item.name)}${tag}</td>
+      <td class="c-inv">${haveHtml(item)}</td>
+      <td class="c-sources">${sourcesHtml(task, item)}</td>${last}
+    </tr>`;
+  }).join('');
 }
 
 // ── Table header ──────────────────────────────────────────────────────────────
@@ -1344,6 +1350,7 @@ function startResetCountdown() {
 const RELAYS          = [{ host: 'relay.bitjita.com' }, { host: 'relay.bitcraftsync.app', portBase: 3000 }];
 const LIVE_RELOAD_MS  = 4000;                  // gather a burst of changes into one reload
 const LIVE_RETRY_MS   = [15000, 30000, 60000]; // BitJita can lag: reload again while new tasks are missing
+const LIVE_FILL_MS    = 60000;                 // a new task built from the pool gets the rest a minute later
 const LIVE_RENDER_MS  = 300;                   // inventory changes come in bursts while playing
 const LIVE_STALLS_RELOAD_MS = 15000;           // gather trade changes across all the region's stands
 const liveEl          = $('live-status');
@@ -1583,17 +1590,55 @@ function liveReconcile(changed) {
   const open   = new Set([...L.tasks.values()].filter(r => !r.completed).map(r => r.key));
   const before = S.tasks.length;
   S.tasks = S.tasks.filter(t => !t.entity_id || open.has(t.entity_id));
-  const shown   = new Set(S.tasks.map(t => t.entity_id));
-  const missing = [...open].some(e => !shown.has(e));
-  if (S.tasks.length !== before) {
+  const handedIn = before - S.tasks.length;
+  if (handedIn) {
     if (!S.tasks.length) emptyMsg.textContent = 'No incomplete tasks found.';
     L.dirty = true;
-    liveFlash(`${before - S.tasks.length} task${before - S.tasks.length === 1 ? '' : 's'} handed in`);
+    liveFlash(`${handedIn} task${handedIn === 1 ? '' : 's'} handed in`);
+  }
+  // New tasks: built straight from the traveler's task pool (which /api/tasks already sent), so they show
+  // at once without a reload. One quiet reload later fills in what the pool doesn't have (crafting, all
+  // market prices); it's only retried while a task isn't in the pool and BitJita hasn't caught up.
+  const shown = new Set(S.tasks.map(t => t.entity_id));
+  let added = 0, unknown = false;
+  for (const row of L.tasks.values()) {
+    if (row.completed || shown.has(row.key)) continue;
+    const task = liveTaskFromPool(row);
+    if (task) { S.tasks.push(task); added++; } else unknown = true;
+  }
+  if (added) {
+    L.dirty = true;
+    liveApplyInventory();
+    liveFlash(`${added} new task${added === 1 ? '' : 's'}`);
   }
   if (changed) L.reloadTries = 0;
-  if (missing && L.reloadTries < LIVE_RETRY_MS.length) {
+  if (added && !unknown && changed) liveScheduleReload(LIVE_FILL_MS);
+  else if (unknown && L.reloadTries < LIVE_RETRY_MS.length) {
     liveScheduleReload(changed ? LIVE_RELOAD_MS : LIVE_RETRY_MS[L.reloadTries++]);
   }
+}
+
+// A task the relay just gave the player, from the pool of tasks their traveler can hand out
+function liveTaskFromPool(row) {
+  const traveler = S.credits.find(c => String(c.traveler_id) === String(row.traveler))?.traveler
+                ?? S.tasks.find(t => String(t.traveler_id) === String(row.traveler))?.traveler;
+  const entry = traveler && (S.pool[traveler] || []).find(p => String(p.id) === String(row.task));
+  if (!entry) return null;
+  // reuse what other tasks already know about an item (its market prices)
+  const known = id => S.tasks.flatMap(t => t.items).find(i => String(i.id) === String(id));
+  return {
+    id: entry.id, entity_id: row.key, traveler, traveler_id: Number(row.traveler),
+    description: '', reward: entry.reward, exp_qty: 0, exp_skill_id: '', skill_name: traveler,
+    min_level: null, max_level: null, from_pool: true,
+    items: entry.items.map(i => {
+      const k = known(i.id);
+      return {
+        id: String(i.id), name: i.name, type: i.type, qty: i.qty,
+        inv_have: k?.inv_have_base ?? k?.inv_have ?? i.have_base ?? i.have ?? 0, inv_locations: k?.inv_locations || [],
+        market_price: k?.market_price ?? null, market_prices: k?.market_prices ?? [],
+      };
+    }),
+  };
 }
 
 // Weekly credits per traveler. The reset is global but last_reset only moves when the player is

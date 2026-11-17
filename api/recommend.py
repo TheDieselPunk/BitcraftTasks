@@ -45,7 +45,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 CACHE_S = 300   # seconds Vercel's CDN may serve this response from cache
 
 from _lib import api_get, distance, cors_headers, build_inv_map, build_name_maps, get_claims, get_player_housing_items, \
-    get_skill_levels
+    get_skill_levels, market_item
 from quest_prices import get_all_stalls, stall_offers, stall_label, stall_stock
 
 TRAVELERS  = {1: 'Rumbagh', 2: 'Svim', 3: 'Heimlich', 5: 'Brico', 6: 'Alesi', 7: 'Ramparte'}
@@ -524,7 +524,7 @@ class handler(BaseHTTPRequestHandler):
                     task_set = tasks
 
                 keys    = {i['key'] for t in tasks + task_set for i in t['items']}
-                markets = {k: pool.submit(get, f'/api/market/{k[1]}/{k[0]}') for k in keys}
+                markets = {k: pool.submit(market_item, k[1], k[0]) for k in keys}
 
                 have = build_inv_map(soft(inv_f, {}, 'your inventory'))
                 for storage in house_f.result():

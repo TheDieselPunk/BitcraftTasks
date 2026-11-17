@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 CACHE_S = 120   # seconds Vercel's CDN may serve this response from cache
 
 from _lib import api_get, distance, cors_headers, get_claims, build_inv_map, build_inv_detail_map, get_player_housing_items, \
-    get_skill_levels, merge_housing
+    get_skill_levels, market_item, merge_housing
 
 INFINITE_STOCK = 2_000_000_000
 HEX_COIN_ID    = '1'
@@ -276,7 +276,7 @@ class handler(BaseHTTPRequestHandler):
             warnings = []
 
             def market(pool, keys):
-                return {k: pool.submit(api_get, f'/api/market/{k[1]}/{k[0]}') for k in keys}
+                return {k: pool.submit(market_item, k[1], k[0]) for k in keys}
 
             def add_markets(futures):
                 for k, f in futures.items():

@@ -2,11 +2,17 @@
 Shared utilities for Traveler Tasks Assistant API functions.
 """
 
+import collections
 import json
 import math
+import os
+import threading
+import time
 import urllib.request
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import _relay
 
 API_BASE = 'https://bitjita.com'
 HEADERS = {
@@ -16,7 +22,66 @@ HEADERS = {
 }
 
 
+# ── BitJita rate limit ────────────────────────────────────────────────────────
+# BitJita allows 250 requests a minute. Every call takes a slot first. With UPSTASH_REDIS_REST_URL and
+# UPSTASH_REDIS_REST_TOKEN set, the count is shared by every function instance (a fixed one-minute window
+# in Redis); without them each instance keeps its own count, which can't see the others.
+RATE_LIMIT    = 240   # a little under BitJita's 250, for calls made outside this app's count
+RATE_WINDOW_S = 60
+RATE_WAIT_S   = 20    # longest a call waits for a slot before giving up
+REDIS_URL     = os.environ.get('UPSTASH_REDIS_REST_URL', '').rstrip('/')
+REDIS_TOKEN   = os.environ.get('UPSTASH_REDIS_REST_TOKEN', '')
+
+
+class RateLimited(Exception):
+    pass
+
+
+_local_calls, _local_lock = collections.deque(), threading.Lock()
+
+
+def _slot_local():
+    """Seconds to wait for a slot in this instance's own sliding window, or 0 having taken one."""
+    now = time.time()
+    with _local_lock:
+        while _local_calls and now - _local_calls[0] >= RATE_WINDOW_S:
+            _local_calls.popleft()
+        if len(_local_calls) < RATE_LIMIT:
+            _local_calls.append(now)
+            return 0
+        return RATE_WINDOW_S - (now - _local_calls[0]) + 0.05
+
+
+def _slot_shared():
+    """Same, counted in Redis for every instance: one INCR per call in a per-minute key."""
+    now    = time.time()
+    window = int(now // RATE_WINDOW_S)
+    req    = urllib.request.Request(
+        f'{REDIS_URL}/pipeline', method='POST',
+        data=json.dumps([['INCR', f'bitjita:{window}'], ['EXPIRE', f'bitjita:{window}', str(RATE_WINDOW_S * 2)]]).encode(),
+        headers={'Authorization': f'Bearer {REDIS_TOKEN}', 'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        count = json.loads(r.read())[0]['result']
+    return 0 if count <= RATE_LIMIT else (window + 1) * RATE_WINDOW_S - now + 0.05
+
+
+def take_slot():
+    """Wait for a free BitJita call slot; raises RateLimited if none frees up within RATE_WAIT_S."""
+    deadline = time.time() + RATE_WAIT_S
+    while True:
+        try:
+            wait = _slot_shared() if REDIS_URL and REDIS_TOKEN else _slot_local()
+        except Exception:
+            wait = _slot_local()   # Redis unreachable: fall back to this instance's own count
+        if not wait:
+            return
+        if time.time() + wait > deadline:
+            raise RateLimited(f'BitJita rate limit reached; try again in {math.ceil(wait)}s')
+        time.sleep(wait)
+
+
 def api_get(path, params=None):
+    take_slot()
     url = f'{API_BASE}{path}'
     if params:
         url += '?' + urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
@@ -150,44 +215,43 @@ def get_claims(x, z, region_id):
         return None, []
 
 
-MARKET_SAMPLE = 40   # how many traded items to read orders of when looking for market towns
-
-
 def get_market_towns(x, z, region_id):
     """
-    Claims with a market that /api/claims leaves out: the neutral ruined cities (Emberfall, Amberfield, ...).
-    BitJita has no list of them, so they're read off the orders of a spread of traded items: any town
-    with a working market turns up there. Returns [{id, name, dist, x, z}] like get_claims, unsorted.
+    Claims with a market that /api/claims leaves out: the ruined cities (Emberfall, Amberfield, ...).
+    Every ruined city has a market. On the relay they're the neutral claims without a position in their
+    name (caves and dungeons are named like "Ferralith Cave (N: 2901, E: 6416)").
+    Returns [{id, name, dist, x, z}] like get_claims, unsorted.
     """
     try:
-        traded = api_get('/api/market', {'hasOrders': 'true'}).get('data', {}).get('items', [])
-        traded = [i for i in traded if i.get('hasOrders')]
-        step   = max(1, len(traded) // MARKET_SAMPLE)
-        sample = traded[::step][:MARKET_SAMPLE]
-
-        def orders(item):
-            kind = 'cargo' if item.get('itemType') == 1 else 'item'
-            try:
-                d = api_get(f'/api/market/{kind}/{item["id"]}')
-            except Exception:
-                return []
-            return (d.get('sellOrders') or []) + (d.get('buyOrders') or [])
-
-        towns = {}
-        with ThreadPoolExecutor(max_workers=16) as pool:
-            for found in pool.map(orders, sample):
-                for o in found:
-                    cid, nm = o.get('claimEntityId'), o.get('claimName')
-                    cx, cz  = o.get('claimLocationX'), o.get('claimLocationZ')
-                    if not cid or not nm or cx is None or cz is None or str(cid) in towns:
-                        continue
-                    if region_id and str(o.get('regionId')) != str(region_id):
-                        continue
-                    towns[str(cid)] = {'id': str(cid), 'name': nm, 'dist': round(distance(x, z, cx, cz) / 3),
-                                       'x': float(cx), 'z': float(cz)}
-        return list(towns.values())
+        found, _ = _relay.markets([int(region_id)] if region_id else None)
     except Exception:
         return []
+    towns = []
+    for _orders, claims in found.values():
+        for c in claims.values():
+            if not c['neutral'] or '(N:' in c['name'] or c['x'] is None:
+                continue
+            towns.append({'id': c['id'], 'name': c['name'], 'dist': round(distance(x, z, c['x'], c['z']) / 3),
+                          'x': c['x'], 'z': c['z']})
+    return towns
+
+
+def market_item(kind, item_id, claim_id=None):
+    """
+    An item's sell orders in BitJita's /api/market/{item|cargo}/{id} shape ({sellOrders, stats}), read off
+    the relay (every region's orders in one read each, cached a minute) instead of a BitJita call per item.
+    claim_id narrows it to one claim. Falls back to BitJita if any region can't be read.
+    """
+    kind = 'cargo' if kind == 'cargo' else 'item'
+    found, failed = _relay.markets()
+    if failed:
+        params = {'claimEntityId': claim_id} if claim_id else None
+        return api_get(f'/api/market/{kind}/{item_id}', params)
+    orders = [o for orders, _claims in found.values() for o in orders.get((str(item_id), kind), [])]
+    if claim_id:
+        orders = [o for o in orders if o['claimEntityId'] == str(claim_id)]
+    orders.sort(key=lambda o: o['priceThreshold'] or 0)
+    return {'sellOrders': orders, 'stats': {'totalAvailableSell': sum(o['quantity'] or 0 for o in orders)}}
 
 
 def get_nearest_claim(x, z, region_id):
@@ -412,9 +476,8 @@ def get_market_price(item_id, item_type, claim_id, needed_qty=1):
     Returns the lowest priceThreshold, or None if the claim doesn't have
     enough quantity (totalAvailableSell < needed_qty) or no orders exist.
     """
-    endpoint = f'/api/market/{"cargo" if item_type == "cargo" else "item"}/{item_id}'
     try:
-        d = api_get(endpoint, {'claimEntityId': claim_id})
+        d = market_item(item_type, item_id, claim_id)
     except Exception:
         return None
 
@@ -441,9 +504,8 @@ def get_market_prices_for_claims(item_id, item_type, claim_map):
     Returns a list of {claimId, claimName, price, available} sorted ascending by price.
     available is the sum of order quantities for that claim, or None if not reported.
     """
-    endpoint = f'/api/market/{"cargo" if item_type == "cargo" else "item"}/{item_id}'
     try:
-        d = api_get(endpoint)
+        d = market_item(item_type, item_id)
     except Exception:
         return []
 

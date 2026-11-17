@@ -268,9 +268,27 @@
     .traveler-sub { color: #666688; font-size: .65rem; font-weight: 400; letter-spacing: 0; margin-top: 2px; }
     .c-items     { color: #c8c8dc; line-height: 1.7; }
     .c-inv       { max-width: 120px; line-height: 1.7; }
-    .c-stalls    { max-width: 220px; line-height: 1.7; }
-    .c-market    { max-width: 160px; line-height: 1.7; }
-    .c-craft     { line-height: 1.7; }
+    .c-sources   { line-height: 1.6; min-width: 300px; }
+    .src-line    { white-space: nowrap; }
+    .src-tag     { display: inline-block; min-width: 46px; padding: 0 5px; margin-right: 3px; border-radius: 3px;
+                   font-size: .6rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+                   text-align: center; border: 1px solid; }
+    .src-stall   { color: #b47cff; border-color: #3a2060; }
+    .src-market  { color: #5bc8e8; border-color: #1f4a5a; }
+    .src-barter  { color: #c8902a; border-color: #4a3a1a; }
+    .src-house   { color: #5bc8e8; border-color: #1f3a4a; }
+    .src-craft   { color: #52c46a; border-color: #1f4a28; }
+    .src-have    { color: #52c46a; font-weight: 700; }
+    .src-none    { color: #a05050; }
+    .src-more summary { cursor: pointer; color: #666688; font-size: .67rem; }
+    .src-more summary:hover { color: #c8c8dc; }
+    .task-status { display: inline-block; margin-top: 4px; padding: 1px 7px; border-radius: 999px; font-size: .6rem;
+                   font-weight: 700; letter-spacing: .04em; border: 1px solid; cursor: default; }
+    .status-ready   { color: #52c46a; border-color: #1f4a28; background: #0a1f0a; }
+    .status-buyable { color: #d6a23a; border-color: #4a3a1a; }
+    .status-missing { color: #a05050; border-color: #4a1f1f; }
+    tr.task-first td { border-top: 2px solid #1a1a38; }
+    tr.status-row-ready td.c-traveler { box-shadow: inset 3px 0 0 #52c46a; }
     .c-num       { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
 
     .qty         { color: #5bc8e8; font-weight: 700; }
@@ -363,10 +381,6 @@
 
   <div id="api-warnings"></div>
   <div id="credits-section"></div>
-  <div id="stock-section"></div>
-  <div id="recommend-section"></div>
-  <div id="quests-section"></div>
-  <div id="exp-section"></div>
 
   <div id="tbl-wrap">
     <div id="empty-msg"></div>
@@ -375,6 +389,11 @@
       <tbody id="tbl-body"></tbody>
     </table>
   </div>
+
+  <div id="stock-section"></div>
+  <div id="recommend-section"></div>
+  <div id="quests-section"></div>
+  <div id="exp-section"></div>
 
   <script src="app.js"></script>
   <footer style="text-align:center;padding:2rem 0 1rem;color:#444;font-size:.75rem;letter-spacing:.05em;">
