@@ -24,13 +24,14 @@ HEADERS = {
 
 # ── BitJita rate limit ────────────────────────────────────────────────────────
 # BitJita allows 250 requests a minute. Every call takes a slot first. With UPSTASH_REDIS_REST_URL and
-# UPSTASH_REDIS_REST_TOKEN set, the count is shared by every function instance (a fixed one-minute window
+# UPSTASH_REDIS_REST_TOKEN set (or KV_REST_API_URL / KV_REST_API_TOKEN, the names Vercel's Upstash
+# integration uses), the count is shared by every function instance (a fixed one-minute window
 # in Redis); without them each instance keeps its own count, which can't see the others.
 RATE_LIMIT    = 240   # a little under BitJita's 250, for calls made outside this app's count
 RATE_WINDOW_S = 60
 RATE_WAIT_S   = 20    # longest a call waits for a slot before giving up
-REDIS_URL     = os.environ.get('UPSTASH_REDIS_REST_URL', '').rstrip('/')
-REDIS_TOKEN   = os.environ.get('UPSTASH_REDIS_REST_TOKEN', '')
+REDIS_URL     = (os.environ.get('UPSTASH_REDIS_REST_URL') or os.environ.get('KV_REST_API_URL') or '').rstrip('/')
+REDIS_TOKEN   = os.environ.get('UPSTASH_REDIS_REST_TOKEN') or os.environ.get('KV_REST_API_TOKEN') or ''
 
 
 class RateLimited(Exception):

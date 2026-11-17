@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.18.0';
+const APP_VERSION = '1.18.1';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
