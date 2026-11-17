@@ -19,7 +19,9 @@ How it decides:
     e.g. "10 Muddy Guppi for 60" for Alesi's 65-coin task. The price is the task's reward less the buyer's
     cut (--profit coins or --margin of the reward, whichever is more) and less the rest of the task bought
     at the going price. Never below the bundle at the going price (the quantity-weighted median of the
-    region's market sell orders, or BitJita's global median when the region has none). Tasks wanting the
+    region's market sell orders, or BitJita's global median when the region has none). For an item nobody
+    sells, the floor is what its ingredients are worth instead ("Parts/u": the cheapest recipe, each
+    ingredient at the lower of its going price and its own ingredients' worth). Tasks wanting the
     same quantity share a trade, priced where it brings in the most; "×N" is how many to stock.
 
 Recipes and item details are cached in tools/.cache for a week (they hardly change); markets, stalls,
@@ -164,6 +166,33 @@ class Difficulty:
             todo = {(i, t) for d in details.values() for r in d['recipes'] for i, t, _ in r['inputs']} - seen
             if todo:
                 log(f'  recipes: {len(seen)} items read, {len(todo)} more ingredients to look up')
+        return seen
+
+    def parts_cost(self, key, going, path=()):
+        """
+        What one unit's ingredients are worth: the cheapest recipe, each ingredient at the lower of its going
+        price and its own ingredients' worth. None when something in every recipe has no price at all.
+        """
+        memo = self.__dict__.setdefault('cost_memo', {})
+        if key in memo:
+            return memo[key]
+        if key in path or len(path) > MAX_DEPTH:
+            return None
+        best = None
+        for r in item_detail(key)['recipes']:
+            total = 0
+            for i, t, q in r['inputs']:
+                worth = [v for v in (going.get((i, t)), self.parts_cost((i, t), going, path + (key,))) if v is not None]
+                if not worth and item_detail((i, t))['median']:
+                    worth = [item_detail((i, t))['median']]   # nothing better: BitJita's global median
+                if not worth:
+                    total = None
+                    break
+                total += min(worth) * q
+            if total is not None and (best is None or total / r['makes'] < best):
+                best = total / r['makes']
+        memo[key] = best
+        return best
 
     def steps(self, key, path=()):
         """(steps, recipe or None). Gathered and uncraftable items are 0 steps."""
@@ -352,18 +381,19 @@ def best_text(r):
 
 
 def print_table(rows, skipped):
-    head = ['#', 'Item', 'T', 'Steps', 'Need', 'Nearby', 'Short', 'Going/u', 'Trades (qty for coins ×stock)', 'Brings in', 'Buyers']
+    head = ['#', 'Item', 'T', 'Steps', 'Need', 'Nearby', 'Short', 'Going/u', 'Parts/u', 'Trades (qty for coins ×stock)',
+            'Brings in', 'Buyers']
     data = [[str(n), r['name'][:32], fmt(r['tier']), str(r['steps']), fmt(r['demand']), fmt(r['supply']),
-             fmt(r['shortfall']), fmt(r['going']), trades_text(r)[:44], fmt(r['revenue']),
-             ', '.join(r['buyers'])[:40]] for n, r in enumerate(rows, 1)]
+             fmt(r['shortfall']), fmt(r['going']), fmt(r['parts'] and round(r['parts'], 1)), trades_text(r)[:44],
+             fmt(r['revenue']), ', '.join(r['buyers'])[:40]] for n, r in enumerate(rows, 1)]
     widths = [max(len(h), *(len(d[i]) for d in data)) if data else len(h) for i, h in enumerate(head)]
-    line = lambda cells: '  '.join(c.ljust(w) if i in (1, 8, 10) else c.rjust(w) for i, (c, w) in enumerate(zip(cells, widths)))
+    line = lambda cells: '  '.join(c.ljust(w) if i in (1, 9, 11) else c.rjust(w) for i, (c, w) in enumerate(zip(cells, widths)))
     print(line(head))
     print('  '.join('-' * w for w in widths))
     for d in data:
         print(line(d))
     if skipped:
-        print(f'\nShort nearby, but no member profits at the going price ({len(skipped)}): '
+        print(f'\nShort nearby, but no member profits at the going price or what its parts are worth ({len(skipped)}): '
               + ', '.join(f"{r['name']} (going {fmt(r['going'])}/u, best a buyer could pay {best_text(r)})" for r in skipped[:15]))
 
 
@@ -377,7 +407,7 @@ def write_html(path, rows, skipped, meta):
                     f'<td><b>{html.escape(r["name"])}</b><div class="sub">{html.escape(r["chain"] or ("gathered" if r["steps"] == 0 else ""))}</div></td>' +
                     cell(fmt(r['tier']), 'num') + cell(r['steps'], 'num') + cell(fmt(r['demand']), 'num') +
                     cell(fmt(r['supply']), 'num') + cell(fmt(r['shortfall']), 'num') + cell(fmt(r['going']), 'num') +
-                    cell(trades_text(r), 'price') + cell(fmt(r['units']), 'num') + cell(fmt(r['revenue']), 'num') +
+                    cell(fmt(r['parts'] and round(r['parts'], 1)), 'num') + cell(trades_text(r), 'price') + cell(fmt(r['units']), 'num') + cell(fmt(r['revenue']), 'num') +
                     cell(', '.join(r['buyers'])) + cell(mine) + '</tr>')
     skipped_html = ''.join(
         f'<li>{html.escape(r["name"])}: short {fmt(r["shortfall"])}, going {fmt(r["going"])} each, '
@@ -399,9 +429,9 @@ h2 {{ font-size:15px; margin:28px 0 8px; }} li {{ color:var(--mute); }}
 <h1>Stall planner</h1>
 <p class="meta">{html.escape(meta)}</p>
 <div class="wrap"><table><thead><tr><th>#</th><th>Item</th><th>Tier</th><th>Steps</th><th>Members need</th><th>Sold nearby</th>
-<th>Short</th><th>Going price (each)</th><th>Trades to set up (qty for coins ×stock)</th><th>Units</th><th>Brings in</th><th>Buyers</th><th>You list now</th></tr></thead>
+<th>Short</th><th>Going price (each)</th><th>Parts worth (each)</th><th>Trades to set up (qty for coins ×stock)</th><th>Units</th><th>Brings in</th><th>Buyers</th><th>You list now</th></tr></thead>
 <tbody>{''.join(body)}</tbody></table></div>
-{f'<h2>Short nearby, but no member profits at the going price</h2><ul>{skipped_html}</ul>' if skipped else ''}
+{f'<h2>Short nearby, but no member profits at the going price or what its parts are worth</h2><ul>{skipped_html}</ul>' if skipped else ''}
 </body></html>"""
     with open(path, 'w', encoding='utf-8') as f:
         f.write(page)
@@ -482,11 +512,20 @@ def main():
     # Difficulty
     log('Working out recipe trees...')
     diff = Difficulty(names)
-    diff.prefetch(short)
+    tree = diff.prefetch(short)
+    _, tree_going, _ = market_supply(region, market_ids, me_id, tree - set(going))   # ingredients' going prices
+    going.update(tree_going)
+    # Items you'd sell fall back to BitJita's global median; ingredients don't, as their own parts are a
+    # better guide than a median from other regions (Rough Tanned Pelt: global 10, its parts about 31)
     for k in short:
         if going.get(k) is None:
-            median   = item_detail(k)['median']
-            going[k] = median or weighted_median(stall_prices.get(k, []))
+            going[k] = item_detail(k)['median'] or weighted_median(stall_prices.get(k, []))
+
+    # What a unit is worth: its going price, or for an item nobody sells, what its ingredients are worth
+    value = dict(going)
+    for k in tree:
+        if value.get(k) is None:
+            value[k] = diff.parts_cost(k, going)
 
     rows, skipped = [], []
     for k, gap in short.items():
@@ -494,9 +533,10 @@ def main():
         steps = diff.steps(k)[0]
         if steps < args.min_steps:
             continue
-        trades, top = price_item(k, [t for t in tasks if k in t['lacks']], going, args.profit, args.margin, gap)
+        trades, top = price_item(k, [t for t in tasks if k in t['lacks']], value, args.profit, args.margin, gap)
         row = {'name': info.get('name') or k[0], 'tier': info.get('tier'), 'steps': steps, 'chain': diff.chain(k),
                'demand': need[k], 'supply': supply.get(k, 0), 'shortfall': gap, 'going': going.get(k),
+               'parts': diff.parts_cost(k, going),
                'mine': mine.get(k, [])}
         if trades:
             rows.append({**row, 'trades': trades, 'units': sum(t['bundle'] * t['trades'] for t in trades),
