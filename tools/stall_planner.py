@@ -12,9 +12,11 @@ How it decides:
   - Supply: what other players sell at the market claims (--markets) right now: market sell orders and
     Hex Coin stall trades at those claims, stall stock checked against what the stall holds.
   - An item is worth selling only where demand exceeds that supply (the shortfall).
-  - Difficulty: how many crafting steps the item takes from gathered materials, by its easiest recipe.
-    A gathered item (a fish, a flower) is 0; Basic Ink is pigment + fish oil + the ink itself = 3.
-    The list is ranked hardest first, then by what the sales would bring in.
+  - Ranking: coins per action. "Brings in" is every coin the trades put in your stall; "Actions" is every
+    gather and craft it takes to stock them. An item with no recipe (gathered, fished, hunted or dropped)
+    counts one action per unit; a craft counts one plus its ingredients, by the recipe that takes least.
+    So 10 Muddy Guppi is 10 actions and one Rough Leather Sheeting about 50. A drop that takes several
+    kills per unit is undercounted, as the item data can't tell a drop from a gather.
   - Price: Trader Stand trades are bundles, so each trade is a task's whole quantity for a lump sum,
     e.g. "10 Muddy Guppi for 60" for Alesi's 65-coin task. The price is the task's reward less the buyer's
     cut (--profit coins or --margin of the reward, whichever is more) and less the rest of the task bought
@@ -167,6 +169,36 @@ class Difficulty:
             if todo:
                 log(f'  recipes: {len(seen)} items read, {len(todo)} more ingredients to look up')
         return seen
+
+    def work(self, key, path=()):
+        """
+        Actions to get one unit from scratch: an item with no recipe (gathered, fished, hunted or dropped) is
+        one action per unit, a craft is one action plus its ingredients' work, divided by what it makes.
+        By the recipe that takes the least work. Rough Leather Sheeting comes to about 50, a fish to 1.
+        """
+        memo = self.__dict__.setdefault('work_memo', {})
+        if key in memo:
+            return memo[key]
+        if key in path or len(path) > MAX_DEPTH:
+            return None   # a loop: this route doesn't bottom out
+        best = None
+        recipes = item_detail(key)['recipes']
+        for r in recipes:
+            total = 1
+            for i, t, q in r['inputs']:
+                w = self.work((i, t), path + (key,))
+                if w is None:
+                    total = None
+                    break
+                total += w * q
+            if total is not None and (best is None or total / r['makes'] < best):
+                best = total / r['makes']
+        if best is None:
+            if recipes and path:
+                return None   # every recipe loops back: let the caller pick another
+            best = 1.0
+        memo[key] = best
+        return best
 
     def parts_cost(self, key, going, path=()):
         """
@@ -381,13 +413,13 @@ def best_text(r):
 
 
 def print_table(rows, skipped):
-    head = ['#', 'Item', 'T', 'Steps', 'Need', 'Nearby', 'Short', 'Going/u', 'Parts/u', 'Trades (qty for coins ×stock)',
-            'Brings in', 'Buyers']
-    data = [[str(n), r['name'][:32], fmt(r['tier']), str(r['steps']), fmt(r['demand']), fmt(r['supply']),
-             fmt(r['shortfall']), fmt(r['going']), fmt(r['parts'] and round(r['parts'], 1)), trades_text(r)[:44],
-             fmt(r['revenue']), ', '.join(r['buyers'])[:40]] for n, r in enumerate(rows, 1)]
+    head = ['#', 'Item', 'Coins/action', 'Brings in', 'Actions', 'Trades (qty for coins ×stock)', 'Short', 'Going/u',
+            'Parts/u', 'Work/u', 'Buyers']
+    data = [[str(n), r['name'][:32], fmt(round(r['rate'], 1)), fmt(r['revenue']), fmt(round(r['work'])), trades_text(r)[:44],
+             fmt(r['shortfall']), fmt(r['going']), fmt(r['parts'] and round(r['parts'], 1)), fmt(round(r['work_u'], 1)),
+             ', '.join(r['buyers'])[:40]] for n, r in enumerate(rows, 1)]
     widths = [max(len(h), *(len(d[i]) for d in data)) if data else len(h) for i, h in enumerate(head)]
-    line = lambda cells: '  '.join(c.ljust(w) if i in (1, 9, 11) else c.rjust(w) for i, (c, w) in enumerate(zip(cells, widths)))
+    line = lambda cells: '  '.join(c.ljust(w) if i in (1, 5, 10) else c.rjust(w) for i, (c, w) in enumerate(zip(cells, widths)))
     print(line(head))
     print('  '.join('-' * w for w in widths))
     for d in data:
@@ -405,9 +437,11 @@ def write_html(path, rows, skipped, meta):
         mine = ', '.join(f'{u:,} @ {p:,}' for p, u in r['mine']) if r['mine'] else ''
         body.append('<tr>' + cell(n, 'num') +
                     f'<td><b>{html.escape(r["name"])}</b><div class="sub">{html.escape(r["chain"] or ("gathered" if r["steps"] == 0 else ""))}</div></td>' +
-                    cell(fmt(r['tier']), 'num') + cell(r['steps'], 'num') + cell(fmt(r['demand']), 'num') +
-                    cell(fmt(r['supply']), 'num') + cell(fmt(r['shortfall']), 'num') + cell(fmt(r['going']), 'num') +
-                    cell(fmt(r['parts'] and round(r['parts'], 1)), 'num') + cell(trades_text(r), 'price') + cell(fmt(r['units']), 'num') + cell(fmt(r['revenue']), 'num') +
+                    cell(fmt(round(r['rate'], 1)), 'num price') + cell(fmt(r['revenue']), 'num') +
+                    cell(fmt(round(r['work'])), 'num') + cell(trades_text(r), 'price') + cell(fmt(r['units']), 'num') +
+                    cell(fmt(r['demand']), 'num') + cell(fmt(r['supply']), 'num') + cell(fmt(r['shortfall']), 'num') +
+                    cell(fmt(r['going']), 'num') + cell(fmt(r['parts'] and round(r['parts'], 1)), 'num') +
+                    cell(fmt(round(r['work_u'], 1)), 'num') + cell(fmt(r['tier']), 'num') +
                     cell(', '.join(r['buyers'])) + cell(mine) + '</tr>')
     skipped_html = ''.join(
         f'<li>{html.escape(r["name"])}: short {fmt(r["shortfall"])}, going {fmt(r["going"])} each, '
@@ -428,8 +462,9 @@ h2 {{ font-size:15px; margin:28px 0 8px; }} li {{ color:var(--mute); }}
 </style></head><body>
 <h1>Stall planner</h1>
 <p class="meta">{html.escape(meta)}</p>
-<div class="wrap"><table><thead><tr><th>#</th><th>Item</th><th>Tier</th><th>Steps</th><th>Members need</th><th>Sold nearby</th>
-<th>Short</th><th>Going price (each)</th><th>Parts worth (each)</th><th>Trades to set up (qty for coins ×stock)</th><th>Units</th><th>Brings in</th><th>Buyers</th><th>You list now</th></tr></thead>
+<div class="wrap"><table><thead><tr><th>#</th><th>Item</th><th>Coins per action</th><th>Brings in</th><th>Actions</th>
+<th>Trades to set up (qty for coins ×stock)</th><th>Units</th><th>Members need</th><th>Sold nearby</th><th>Short</th>
+<th>Going price (each)</th><th>Parts worth (each)</th><th>Actions (each)</th><th>Tier</th><th>Buyers</th><th>You list now</th></tr></thead>
 <tbody>{''.join(body)}</tbody></table></div>
 {f'<h2>Short nearby, but no member profits at the going price or what its parts are worth</h2><ul>{skipped_html}</ul>' if skipped else ''}
 </body></html>"""
@@ -539,13 +574,17 @@ def main():
                'parts': diff.parts_cost(k, going),
                'mine': mine.get(k, [])}
         if trades:
-            rows.append({**row, 'trades': trades, 'units': sum(t['bundle'] * t['trades'] for t in trades),
-                         'revenue': sum(t['revenue'] for t in trades),
+            units   = sum(t['bundle'] * t['trades'] for t in trades)
+            revenue = sum(t['revenue'] for t in trades)
+            work    = units * diff.work(k)
+            rows.append({**row, 'trades': trades, 'units': units, 'revenue': revenue, 'work_u': diff.work(k),
+                         'work': work, 'rate': revenue / work,
                          'buyers': sorted({m for t in trades for m in t['buyers']})})
         else:
             skipped.append({**row, 'best': top})
-    rows.sort(key=lambda r: (-r['steps'], -r['revenue']))
-    skipped.sort(key=lambda r: -r['steps'])
+    # Coins that land in the stall for each gather or craft it takes to stock it
+    rows.sort(key=lambda r: (-r['rate'], -r['revenue']))
+    skipped.sort(key=lambda r: -r['shortfall'])
 
     meta = (f"{len(active)} active {claim['name']} members, {len(tasks)} open tasks · supply at "
             f"{' + '.join(market_names)} · buyer keeps {args.profit} coins or {args.margin:.0%} of the reward · "
