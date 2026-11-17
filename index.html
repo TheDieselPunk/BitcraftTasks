@@ -171,6 +171,36 @@
     #toolbar button:hover { border-color: #f0a500; color: #f0a500; }
     #btn-filter.active { background: #0a1f0a; border-color: #52c46a; color: #52c46a; }
     #status     { font-size: .7rem; color: #444466; }
+    #live-status {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 10px 3px 8px; border: 1px solid #2a2a5a; border-radius: 999px;
+      font-size: .65rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+      color: #666688; cursor: default;
+    }
+    #live-status:empty { display: none; }
+    .live-dot {
+      width: 9px; height: 9px; border-radius: 50%; flex: none;
+      background: #555570;
+    }
+    #live-status.live-live       { color: #52c46a; border-color: #1f4a28; }
+    #live-status.live-live .live-dot {
+      background: radial-gradient(circle at 35% 35%, #b8ffc6, #3ddc5f 55%, #1f8a35);
+      box-shadow: 0 0 6px 1px #3ddc5f99;
+      animation: live-pulse 2s ease-in-out infinite;
+    }
+    #live-status.live-connecting,
+    #live-status.live-retrying   { color: #d6a23a; border-color: #4a3a1a; }
+    #live-status.live-connecting .live-dot,
+    #live-status.live-retrying .live-dot {
+      background: radial-gradient(circle at 35% 35%, #ffe7a8, #f0a500 60%, #9a6a00);
+      animation: live-blink 1s ease-in-out infinite;
+    }
+    #live-status.live-off        { color: #a05050; border-color: #4a1f1f; }
+    #live-status.live-off .live-dot {
+      background: radial-gradient(circle at 35% 35%, #ffb0b0, #d04848 60%, #7a2020);
+    }
+    @keyframes live-pulse { 0%, 100% { box-shadow: 0 0 4px 0 #3ddc5f88; } 50% { box-shadow: 0 0 9px 3px #3ddc5fcc; } }
+    @keyframes live-blink { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
     #api-warnings { padding: 4px 20px; font-size: .75rem; color: #c8902a; display: none; }
     #api-warnings .warn-item::before { content: '⚠ '; }
 
@@ -235,6 +265,7 @@
     .route-stop   { color: #c8c8dc; cursor: default; border-bottom: 1px dotted #444466; }
     .pickup-place { color: #52c46a; font-weight: 700; }
     .stand-mark   { color: #e05050; font-weight: 800; }
+    .stand-live   { color: #3ddc5f; font-size: .7em; margin-left: 3px; text-shadow: 0 0 4px #3ddc5f99; cursor: default; }
     .quest-in_progress .quest-status { color: #f0a500; }
     .quest-ready .quest-status       { color: #52c46a; }
     .quest-locked                    { opacity: .55; }
@@ -372,6 +403,7 @@
     <button id="btn-refresh">↺ Refresh</button>
     <button id="btn-filter">☑ Completable only</button>
     <button id="btn-csv">↓ CSV</button>
+    <span id="live-status"></span>
     <span id="status"></span>
   </div>
 

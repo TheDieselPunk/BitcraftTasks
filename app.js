@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.15.0';
+const APP_VERSION = '1.16.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -36,6 +36,7 @@ const S = {
   questRegion:   '',
   questOffers:   null,   // {item_id: [offer]} from any region near the player, for the shopping route
   pool:          {},     // {traveler: [{id, reward, items: [{id, type, name, qty, have}]}]}: tasks they can give
+  invBags:       {},     // {container entity id: {item_id: qty}} as BitJita last saw it
   recommend:     null,   // {claims, pool, ready, total, range} from /api/recommend, or {loading: true}
   tasksLoaded:   false,
   stallsLoaded:  false,
@@ -321,7 +322,14 @@ async function loadTasks() {
     S.creditsReset = resets.length ? Math.min(...resets) : null;
     S.quests       = data.quests || [];
     S.pool         = data.pool || {};
+    S.invBags      = data.inv_bags || {};
     S.tasksLoaded  = true;
+    liveStart();          // keep tasks, credits and inventory in sync with the game from here on
+    // BitJita can lag behind the game: drop tasks the relay says are done, use the relay's counts
+    liveReconcile(false);
+    liveApplyCredits();
+    liveApplyInventory();
+    L.dirty = L.creditsDirty = false;   // everything below renders anyway
     showWarnings(data.warnings);
     renderCredits();
     renderStock();
@@ -387,6 +395,8 @@ async function loadStalls() {
     S.marketMap     = data.nearestMarket?.items  || {};
     S.marketClaim   = data.nearestMarket || null;
     S.stallsLoaded  = true;
+    liveWatchStands();      // follow the watched Trader Stands live
+    L.dirty = false;        // render() below covers it
     showWarnings(data.warnings);
 
     // Populate autocomplete datalist with region stall owners
@@ -407,18 +417,23 @@ async function loadStalls() {
 function buildStallMap() {
   const map = {};
   for (const stall of S.stalls.filter(s => s.items?.length)) {
+    if (stall.live && !stall.deployed) continue;   // the relay says this stand is packed up
     for (const it of stall.items) {
+      // live: what the stand actually holds, capped by the trade's remaining stock
+      const stock = stall.live ? (it.stock == null ? it.stock_live : Math.min(it.stock, it.stock_live)) : it.stock;
+      if (stall.live && !stock) continue;
       if (!map[it.id]) map[it.id] = [];
       map[it.id].push({
         name:        stall.name,
         stand:       stall.stand || false,
+        liveSpot:    stall.live ? { x: stall.live_x, z: stall.live_z, stock } : null,
         owner:       stall.owner,
         claimName:   stall.claimName,
         distance:    stall.distance,
         watched:     stall.watched || false,
         isBarter:    false,
         qty:         it.qty,
-        stock:       it.stock,
+        stock,
         price_parts: it.price_parts || [],
       });
     }
@@ -1178,7 +1193,8 @@ function renderRow(task) {
     const locs = (item.inv_locations || [])
       .map(l => `${l.qty.toLocaleString()} in ${l.label}`)
       .join('\n');
-    const tipText = `${item.inv_have.toLocaleString()} / ${item.qty.toLocaleString()} needed${locs ? '\n' + locs : ''}`;
+    const tipText = `${item.inv_have.toLocaleString()} / ${item.qty.toLocaleString()} needed${locs ? '\n' + locs : ''}` +
+                    (item.inv_have_live ? '\n(live count; the breakdown is from the last refresh)' : '');
     return `<span class="${cls}" data-tip="${esc(tipText)}">${item.inv_have.toLocaleString()}</span>`;
   }).join('<br>');
 
@@ -1210,7 +1226,10 @@ function renderRow(task) {
         : '';
       const watchedMark = m.watched ? `<span style="color:#f0a500" title="Watched">★ </span>` : '';
       const displayName = m.name !== m.owner && m.name ? m.name : m.owner;
-      const standMark = m.stand ? `<span data-tip="Trader Stands can be moved, so this one ${STAND_NOTE}">${STAND_MARK}</span>` : '';
+      const standMark = !m.stand ? ''
+        : m.liveSpot ? `<span class="stand-live" data-tip="${esc(`Live: set up at N ${Math.round(m.liveSpot.z / 3)}, E ${Math.round(m.liveSpot.x / 3)}` +
+                         `, ${m.liveSpot.stock.toLocaleString()} in stock`)}">●</span>`
+        : `<span data-tip="Trader Stands can be moved, so this one ${STAND_NOTE}">${STAND_MARK}</span>`;
       return `${watchedMark}<span class="stall-name">${esc(displayName)}</span>${standMark}${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
     });
     return lines.join('<br>');
@@ -1332,6 +1351,399 @@ function startResetCountdown() {
   };
   tick();
   S.resetTimer = setInterval(tick, 1000);
+}
+
+// ── Live tasks, credits and inventory ─────────────────────────────────────────
+// BitJita's relay streams the game's own tables over SpacetimeDB's v1 JSON protocol, one database per
+// region. Rows come as JSON arrays in column order:
+//   traveler_task_state         [entity_id, player_entity_id, traveler_id, task_id, completed]
+//   traveler_task_credit_state  [entity_id, player_entity_id, traveler_id, credits, last_reset]
+//   inventory_state             [entity_id, pockets, inventory_index, cargo_index, owner_entity_id, player_owner_entity_id]
+// A hand-in, credits and the player's own containers in their region are applied straight away. The relay
+// only has ids, so a new task triggers a quiet reload of /api/tasks for its names, prices and stock.
+// Containers the relay doesn't hold (deployables, other regions, housing) keep BitJita's counts.
+const RELAYS          = [{ host: 'relay.bitjita.com' }, { host: 'relay.bitcraftsync.app', portBase: 3000 }];
+const LIVE_RELOAD_MS  = 4000;                  // gather a burst of changes into one reload
+const LIVE_RETRY_MS   = [15000, 30000, 60000]; // BitJita can lag: reload again while new tasks are missing
+const LIVE_RENDER_MS  = 300;                   // inventory changes come in bursts while playing
+const liveEl          = $('live-status');
+const L = {
+  ws: null, key: null, ready: false, relay: 0, fails: 0,
+  tasks: new Map(), credits: new Map(), bags: new Map(), positions: new Map(), orders: new Map(),
+  sentStands: [], liveStands: new Set(), requestId: 0, dirty: false, creditsDirty: false,
+  retryTimer: null, reloadTimer: null, renderTimer: null, stallsTimer: null, reloadTries: 0, reloading: false,
+};
+
+function liveKey() {
+  const id = String(S.player?.id ?? ''), region = parseInt(S.player?.regionId, 10);
+  return /^\d+$/.test(id) && region > 0 ? `${region}:${id}` : null;
+}
+
+function liveStart() {
+  const key = liveKey();
+  if (key === L.key && L.ws) return;   // already following this player
+  liveStop();
+  if (!key) { liveSetStatus('off', 'Live updates need the player’s region'); return; }
+  L.key = key;
+  liveConnect(0);
+}
+
+function liveStop() {
+  clearTimeout(L.retryTimer);
+  clearTimeout(L.reloadTimer);
+  clearTimeout(L.renderTimer);
+  clearTimeout(L.stallsTimer);
+  clearInterval(L.probeTimer);
+  const ws = L.ws;
+  Object.assign(L, { ws: null, key: null, ready: false, fails: 0, reloadTries: 0, sentStands: [], liveStands: new Set(),
+                     tasks: new Map(), credits: new Map(), bags: new Map(), positions: new Map(), orders: new Map() });
+  if (ws) { ws.onclose = null; ws.close(); }
+  liveSetStatus('off');
+}
+
+function liveRelayUrl(i) {
+  const region = L.key.split(':')[0];
+  const relay  = RELAYS[i];
+  const port   = relay.portBase ? `:${relay.portBase + Number(region)}` : '';
+  return `wss://${relay.host}${port}/v1/database/idc-${region}/subscribe?compression=None&light=true`;
+}
+
+// BitJita's relay first. The backup is only for when it doesn't answer: a failed attempt moves straight
+// on to the next relay, and once all have failed the page waits and starts over from BitJita's.
+function liveConnect(i = 0) {
+  clearInterval(L.probeTimer);
+  L.relay = i;
+  liveSetStatus(L.fails ? 'retrying' : 'connecting');
+  let ws;
+  try { ws = new WebSocket(liveRelayUrl(i), ['v1.json.spacetimedb']); }
+  catch { liveNextRelay(i); return; }
+  L.ws = ws;
+  ws.onopen = () => liveSubscribe();
+  ws.onmessage = e => liveMessage(ws, e.data);
+  ws.onclose = () => {
+    if (L.ws !== ws) return;
+    if (ws.gotData) liveRetry();   // dropped after working: start over from BitJita's relay
+    else liveNextRelay(i);         // never answered: try the next relay now
+  };
+}
+
+function liveNextRelay(i) {
+  L.ws = null; L.ready = false;
+  if (i + 1 < RELAYS.length) liveConnect(i + 1);
+  else liveRetry();
+}
+
+function liveRetry() {
+  L.ws = null; L.ready = false; L.fails++;
+  const wait = Math.min(30000, 1000 * 2 ** Math.min(L.fails, 5));
+  liveSetStatus('retrying');
+  clearTimeout(L.retryTimer);
+  L.retryTimer = setTimeout(() => { if (L.key) liveConnect(0); }, wait);
+}
+
+// While on the backup, check BitJita's relay every couple of minutes and move back once it answers
+const LIVE_PROBE_MS = 120000;
+function liveProbePrimary() {
+  clearInterval(L.probeTimer);
+  L.probeTimer = setInterval(() => {
+    if (!L.key || L.relay === 0) { clearInterval(L.probeTimer); return; }
+    const key = L.key;
+    let probe;
+    try { probe = new WebSocket(liveRelayUrl(0), ['v1.json.spacetimedb']); } catch { return; }
+    const done = setTimeout(() => probe.close(), 10000);
+    probe.onmessage = () => {
+      clearTimeout(done);
+      probe.onclose = null;
+      probe.close();
+      if (L.key !== key || L.relay === 0) return;
+      const old = L.ws;
+      if (old) { old.onclose = null; old.close(); }
+      liveConnect(0);
+    };
+    probe.onclose = () => clearTimeout(done);
+  }, LIVE_PROBE_MS);
+}
+
+// Each table's columns in order. BitJita's relay sends rows as arrays in this order; the backup relay
+// sends objects keyed by column name. liveParse turns both into arrays.
+const LIVE_TABLES = {
+  traveler_task_state: {
+    cols: ['entity_id', 'player_entity_id', 'traveler_id', 'task_id', 'completed'],
+    map:  'tasks',   read: v => ({ key: String(v[0]), task: String(v[3]), traveler: v[2], completed: !!v[4] }),
+  },
+  traveler_task_credit_state: {
+    cols: ['entity_id', 'player_entity_id', 'traveler_id', 'credits', 'last_reset'],
+    map:  'credits', read: v => ({ key: String(v[2]), credits: v[3], last: v[4] }),
+  },
+  inventory_state: {
+    cols: ['entity_id', 'pockets', 'inventory_index', 'cargo_index', 'owner_entity_id', 'player_owner_entity_id'],
+    map:  'bags',    read: v => ({ key: String(v[0]), items: liveBagItems(v[1]), owner: String(v[4]), playerOwner: String(v[5]) }),
+  },
+  // where a watched Trader Stand is now; a packed-up stand has no row
+  mobile_entity_state: {
+    cols: ['entity_id', 'chunk_index', 'timestamp', 'location_x', 'location_z'],
+    map:  'positions', read: v => ({ key: String(v[0]), x: Number(v[3]) / 1000, z: Number(v[4]) / 1000 }),
+  },
+  // a watched stand's trades: only watched for changes, which reload /api/stalls for names and prices
+  trade_order_state: {
+    cols: ['entity_id', 'shop_entity_id', 'remaining_stock'],
+    map:  'orders',  read: v => ({ key: String(v[0]), shop: String(v[1]), stock: v[2] }),
+  },
+};
+
+// Watched Trader Stands to follow: their position, trades and stock (the stand's own inventory)
+function liveStandIds() {
+  return [...new Set(S.stalls.filter(s => s.stand && /^\d+$/.test(String(s.stallEntityId || '')))
+    .map(s => String(s.stallEntityId)))].sort();
+}
+
+function liveQueries() {
+  const playerId = L.key.split(':')[1];
+  const q = [
+    `SELECT * FROM traveler_task_state WHERE player_entity_id = ${playerId}`,
+    `SELECT * FROM traveler_task_credit_state WHERE player_entity_id = ${playerId}`,
+    `SELECT * FROM inventory_state WHERE owner_entity_id = ${playerId}`,          // pockets, toolbelt, wallet
+    `SELECT * FROM inventory_state WHERE player_owner_entity_id = ${playerId}`,   // banks and stashes
+  ];
+  for (const id of L.sentStands) {
+    q.push(`SELECT * FROM mobile_entity_state WHERE entity_id = ${id}`,
+           `SELECT * FROM trade_order_state WHERE shop_entity_id = ${id}`,
+           `SELECT * FROM inventory_state WHERE owner_entity_id = ${id}`);
+  }
+  return q;
+}
+
+// (Re)send the subscription; the relay answers with a fresh InitialSubscription for all of it
+function liveSubscribe() {
+  if (!L.ws || L.ws.readyState !== WebSocket.OPEN) return;
+  L.sentStands = liveStandIds();
+  L.ws.send(JSON.stringify({ Subscribe: { query_strings: liveQueries(), request_id: ++L.requestId } }));
+}
+
+// Called when the watched stands change: follow the new set
+function liveWatchStands() {
+  if (liveStandIds().join() !== L.sentStands.join()) liveSubscribe();
+  liveApplyStands();
+  liveRenderSoon();
+}
+
+function liveMessage(ws, raw) {
+  if (L.ws !== ws) return;
+  // rows arrive as JSON strings inside the message; liveParse reads those with their big ids kept exact
+  let msg;
+  try { msg = JSON.parse(String(raw)); }
+  catch { return; }
+  if (msg.SubscriptionError) {
+    console.warn('[live] subscription error', msg.SubscriptionError.error);
+    liveSetStatus('off', 'The relay refused the live feed');
+    ws.onclose = null; ws.close(); L.ws = null;
+    return;
+  }
+  const initial = msg.InitialSubscription?.database_update;
+  const update  = msg.TransactionUpdateLight?.update ?? msg.TransactionUpdate?.status?.Committed;
+  if (!initial && !update) return;
+  if (initial) {
+    Object.assign(L, { tasks: new Map(), credits: new Map(), bags: new Map(), positions: new Map(), orders: new Map(),
+                       ready: true, fails: 0, liveStands: new Set(L.sentStands) });
+    ws.gotData = true;
+    liveSetStatus('live');
+    if (L.relay > 0) liveProbePrimary();
+  }
+  const changed = new Set();
+  for (const table of (initial || update).tables || []) {
+    const spec = LIVE_TABLES[table.table_name];
+    if (!spec) continue;
+    const map = L[spec.map];
+    for (const u of table.updates || []) {
+      for (const r of u.deletes || []) { const v = liveParse(r, spec.cols); if (v) map.delete(spec.read(v).key); }
+      for (const r of u.inserts || []) { const v = liveParse(r, spec.cols); if (v) { const row = spec.read(v); map.set(row.key, row); } }
+    }
+    changed.add(spec.map);
+  }
+  if (initial || changed.has('credits')) liveApplyCredits();
+  if (initial || changed.has('bags'))    liveApplyInventory();
+  if (initial || changed.has('tasks'))   liveReconcile(!initial);
+  if (initial || changed.has('positions') || changed.has('bags')) liveApplyStands();
+  if (!initial && changed.has('orders')) liveScheduleStallsReload();
+  liveRenderSoon();
+}
+
+function liveParse(r, cols) {
+  // entity ids are bigger than JS numbers can hold exactly, so read them as strings
+  let v = r;
+  if (typeof r === 'string') {
+    try { v = JSON.parse(r.replace(/([:[,])(-?\d{16,})(?=[,}\]])/g, '$1"$2"')); } catch { return null; }
+  }
+  if (Array.isArray(v)) return v;
+  if (v && typeof v === 'object' && cols.every(c => c in v)) return cols.map(c => v[c]);
+  return null;
+}
+
+// {item_id: qty} in one container. A pocket is [volume, contents, locked]; contents is an option,
+// [0, [item_id, quantity, item_type, durability]] when something is in it.
+function liveBagItems(pockets) {
+  const items = {};
+  for (const p of pockets || []) {
+    const c = p?.[1];
+    if (!c || c[0] !== 0 || !Array.isArray(c[1])) continue;
+    const id = String(c[1][0]);
+    items[id] = (items[id] || 0) + (Number(c[1][1]) || 0);
+  }
+  return items;
+}
+
+// Make the table match the relay: drop finished tasks now, reload for tasks BitJita hasn't shown yet.
+// changed = the relay just reported a change to the tasks.
+function liveReconcile(changed) {
+  if (!L.ready || !S.tasksLoaded) return;
+  if (!L.tasks.size) {   // every player has tasks, so none means this region's database doesn't hold them
+    liveSetStatus('off', 'No live task data for this player in their region');
+    return;
+  }
+  const open   = new Set([...L.tasks.values()].filter(r => !r.completed).map(r => r.key));
+  const before = S.tasks.length;
+  S.tasks = S.tasks.filter(t => !t.entity_id || open.has(t.entity_id));
+  const shown   = new Set(S.tasks.map(t => t.entity_id));
+  const missing = [...open].some(e => !shown.has(e));
+  if (S.tasks.length !== before) {
+    if (!S.tasks.length) emptyMsg.textContent = 'No incomplete tasks found.';
+    L.dirty = true;
+    liveFlash(`${before - S.tasks.length} task${before - S.tasks.length === 1 ? '' : 's'} handed in`);
+  }
+  if (changed) L.reloadTries = 0;
+  if (missing && L.reloadTries < LIVE_RETRY_MS.length) {
+    liveScheduleReload(changed ? LIVE_RELOAD_MS : LIVE_RETRY_MS[L.reloadTries++]);
+  }
+}
+
+// Weekly credits per traveler. The reset is global but last_reset only moves when the player is
+// active, so a reset that has passed since then means the credits are full again (as in api/tasks.py).
+const CREDIT_PERIOD_S = 7 * 24 * 3600;
+function liveApplyCredits() {
+  if (!L.ready || !L.credits.size || !S.credits.length) return;
+  const now = Date.now() / 1000;
+  for (const c of S.credits) {
+    const row = L.credits.get(String(c.traveler_id));
+    if (!row) continue;
+    let amount = row.credits, next = null;
+    if (row.last) {
+      const periods = Math.max(1, Math.ceil((now - row.last) / CREDIT_PERIOD_S));
+      next = row.last + periods * CREDIT_PERIOD_S;
+      if (periods > 1 && c.weekly != null) amount = c.weekly;
+    }
+    if (amount !== c.credits || (next && next !== c.next_reset)) {
+      c.credits = amount;
+      if (next) c.next_reset = next;
+      L.dirty = L.creditsDirty = true;
+    }
+  }
+}
+
+// Live item counts: BitJita's total, with each container the relay holds swapped for its live contents.
+function liveApplyInventory() {
+  if (!L.ready || !S.tasksLoaded) return;
+  const playerId = L.key.split(':')[1];
+  const delta = {};
+  for (const [bag, row] of L.bags) {
+    if (row.owner !== playerId && row.playerOwner !== playerId) continue;   // a watched stand's stock
+    const base = S.invBags[bag] || {};
+    for (const id of new Set([...Object.keys(base), ...Object.keys(row.items)])) {
+      const d = (row.items[id] || 0) - (base[id] || 0);
+      if (d) delta[id] = (delta[id] || 0) + d;
+    }
+  }
+  const set = (obj, field, id) => {
+    const baseKey = `${field}_base`;
+    if (obj[baseKey] == null) obj[baseKey] = obj[field] || 0;
+    const v = Math.max(0, obj[baseKey] + (delta[String(id)] || 0));
+    if (v !== obj[field]) { obj[field] = v; L.dirty = true; }
+    obj[`${field}_live`] = !!delta[String(id)];
+  };
+  for (const t of S.tasks) for (const i of t.items) set(i, 'inv_have', i.id);
+  for (const list of Object.values(S.pool)) for (const t of list) for (const i of t.items) set(i, 'have', i.id);
+  for (const q of S.quests) for (const n of q.needs) set(n, 'have', n.id);
+}
+
+// Watched Trader Stands: where they are now, whether they're packed up, and what's in stock.
+// stall.live is set once the relay has answered for that stand.
+function liveApplyStands() {
+  if (!S.stallsLoaded) return;
+  const px = S.player?.locationX, pz = S.player?.locationZ;
+  for (const s of S.stalls) {
+    if (!s.stand) continue;
+    const id = String(s.stallEntityId || '');
+    if (s.distance_base === undefined) s.distance_base = s.distance;
+    if (!L.ready || !L.liveStands.has(id)) {
+      if (s.live) { s.live = false; s.distance = s.distance_base; L.dirty = true; }
+      continue;
+    }
+    const pos   = L.positions.get(id);
+    const stock = {};
+    for (const row of L.bags.values()) {
+      if (row.owner !== id) continue;
+      for (const [iid, q] of Object.entries(row.items)) stock[iid] = (stock[iid] || 0) + q;
+    }
+    s.live     = true;
+    s.deployed = !!pos;
+    s.live_x   = pos?.x ?? null;
+    s.live_z   = pos?.z ?? null;
+    s.distance = pos && px != null && pz != null ? Math.round(Math.hypot(pos.x - px, pos.z - pz)) : s.distance_base;
+    for (const it of s.items) it.stock_live = stock[String(it.id)] || 0;
+    L.dirty = true;
+  }
+}
+
+// A watched stand's trades changed: reload the stalls for their names and prices
+function liveScheduleStallsReload() {
+  clearTimeout(L.stallsTimer);
+  L.stallsTimer = setTimeout(() => { if (S.player && L.key) loadStalls(); }, LIVE_RELOAD_MS);
+}
+
+function liveRenderSoon() {
+  if (!L.dirty) return;
+  clearTimeout(L.renderTimer);
+  L.renderTimer = setTimeout(() => {
+    if (!L.dirty) return;
+    L.dirty = false;
+    if (L.creditsDirty) {
+      L.creditsDirty = false;
+      const resets   = S.credits.map(c => c.next_reset).filter(Boolean);
+      S.creditsReset = resets.length ? Math.min(...resets) : null;
+      renderCredits();
+      startResetCountdown();
+    }
+    renderStock();
+    renderQuests();
+    render();
+  }, LIVE_RENDER_MS);
+}
+
+function liveScheduleReload(ms) {
+  clearTimeout(L.reloadTimer);
+  L.reloadTimer = setTimeout(async () => {
+    if (!S.player || !L.key) return;
+    if (L.reloading) { liveScheduleReload(ms); return; }
+    L.reloading = true;
+    try { await loadTasks(); } finally { L.reloading = false; }
+  }, ms);
+}
+
+function liveSetStatus(state, why = '') {
+  if (!liveEl) return;
+  const label = { live: 'Live', connecting: 'Connecting…', retrying: 'Reconnecting…', off: 'Offline' }[state];
+  liveEl.className = `live-${state}`;
+  liveEl.innerHTML = `<span class="live-dot"></span>${label}`;
+  liveEl.title     = why || {
+    live:       `Connected to the live relay (${RELAYS[L.relay % RELAYS.length].host}): tasks, task credits and the inventory in your region update as you play`,
+    connecting: 'Connecting to BitJita’s live relay…',
+    retrying:   'Lost the connection to BitJita’s live relay; retrying. Refresh still works.',
+    off:        'Not connected to BitJita’s live relay. Refresh to update tasks.',
+  }[state];
+}
+
+function liveFlash(msg) {
+  setStatus(msg);
+  setTimeout(() => { if (statusEl.textContent === msg) setStatus(''); }, 5000);
 }
 
 // ── Data-tip hover ────────────────────────────────────────────────────────────

@@ -182,6 +182,7 @@ def build_credits(tasks_data):
                 amount = cap   # a reset has passed since lastReset, so credits are full again
         credits.append({
             'traveler':   name,
+            'traveler_id': int(tid) if str(tid).isdigit() else None,
             'credits':    amount,
             'weekly':     cap,
             'next_reset': next_reset,
@@ -249,6 +250,7 @@ def build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map):
         skill_id = level.get('skill_id') or exp.get('skill_id')
         tasks.append({
             'id':          task.get('taskId'),
+            'entity_id':   str(task.get('entityId') or ''),   # matches the live relay's traveler_task_state rows
             'traveler':    traveler,
             'traveler_id': traveler_id,
             'description': task.get('description', ''),
@@ -352,6 +354,9 @@ class handler(BaseHTTPRequestHandler):
             meta = {
                 'credits':     build_credits(tasks_data),
                 'reroll_cost': tasks_data.get('rerollCreditCost'),
+                # each container's item counts, so the page can swap in live counts for the ones the relay sees
+                'inv_bags':    {str(b.get('entityId')): build_inv_map({'inventories': [b]})
+                                for b in inv_data.get('inventories', []) if b.get('entityId')},
                 'quests':      build_quests(results.get('quests') or [], (results.get('my_quests') or {}).get('quests', []),
                                             results.get('levels') or {}, inv_map, inv_detail, items_map, cargo_map),
                 'pool':        build_pool(*results.get('catalog') or ([], {}), tasks_data, results.get('quests') or [],
