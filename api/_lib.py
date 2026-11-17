@@ -25,12 +25,20 @@ def api_get(path, params=None):
         return json.loads(r.read())
 
 
-def cors_headers():
+def cors_headers(status=200, body=None, cache_s=0):
+    """
+    cache_s > 0 lets Vercel's CDN keep a successful response that long (s-maxage), so repeat requests for
+    the same URL skip the function. Errors and responses with warnings (a BitJita call failed) never are.
+    Browsers always revalidate; the app adds a unique param when it needs fresh data.
+    """
+    cacheable = cache_s > 0 and status == 200 and not (isinstance(body, dict) and body.get('warnings'))
     return {
         'Access-Control-Allow-Origin':  '*',
         'Access-Control-Allow-Methods': 'GET, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type',
         'Content-Type':                 'application/json',
+        'Cache-Control': f'public, s-maxage={cache_s}, stale-while-revalidate={cache_s}' if cacheable
+                         else 'no-store',
     }
 
 

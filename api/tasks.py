@@ -25,6 +25,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(__file__))
 import urllib.parse
 from recommend import pages, read_tasks, task_pool, unlocked_tiers
+CACHE_S = 60   # seconds Vercel's CDN may serve this response from cache
+
 from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, get_market_prices_for_claims, get_player_housing_items, get_skill_levels, merge_housing, cors_headers
 
 
@@ -429,7 +431,7 @@ class handler(BaseHTTPRequestHandler):
     def _send(self, status, body):
         payload = json.dumps(body).encode()
         self.send_response(status)
-        for k, v in cors_headers().items():
+        for k, v in cors_headers(status, body, CACHE_S).items():
             self.send_header(k, v)
         self.send_header('Content-Length', str(len(payload)))
         self.end_headers()

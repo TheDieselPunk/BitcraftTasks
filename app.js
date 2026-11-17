@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.16.0';
+const APP_VERSION = '1.16.1';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -108,7 +108,7 @@ $('app-version').textContent = `v${APP_VERSION}`;
 
 usernameInput.addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
 btnSearch.addEventListener('click', doSearch);
-btnRefresh.addEventListener('click', () => { S.notifyArmed = true; load(); });
+btnRefresh.addEventListener('click', () => { S.notifyArmed = true; load(true); });
 btnFilter.addEventListener('click', () => {
   S.filterOn = !S.filterOn;
   btnFilter.classList.toggle('active', S.filterOn);
@@ -261,7 +261,7 @@ async function doSearch() {
 }
 
 // ── Main load ─────────────────────────────────────────────────────────────────
-async function load() {
+async function load(fresh = false) {   // fresh: skip the CDN cache (Refresh button)
   if (!S.player) return;
   S.tasksLoaded  = false;
   S.stallsLoaded = false;
@@ -279,10 +279,10 @@ async function load() {
   emptyMsg.textContent = '';
   mainTbl.style.display = 'none';
 
-  loadRecommend();   // slower than the rest and not needed for the table, so it fills in when it's ready
+  loadRecommend(fresh);   // slower than the rest and not needed for the table, so it fills in when it's ready
   await Promise.all([
-    loadTasks(),
-    S.player.locationX != null ? loadStalls() : Promise.resolve(),
+    loadTasks(fresh),
+    S.player.locationX != null ? loadStalls(fresh) : Promise.resolve(),
   ]);
 
   setStatus('');
@@ -299,7 +299,7 @@ function getClaimsInRange(rangeH) {
   });
 }
 
-async function loadTasks() {
+async function loadTasks(fresh = false) {
   try {
     let url = `/api/tasks?player_id=${encodeURIComponent(S.player.id)}&username=${encodeURIComponent(S.player.username)}`;
     if (S.player.regionId) url += `&region_id=${S.player.regionId}`;
@@ -314,7 +314,7 @@ async function loadTasks() {
     } else if (S.selectedClaimId) {
       url += `&claim_id=${encodeURIComponent(S.selectedClaimId)}`;
     }
-    const data = await apiFetch(url);
+    const data = await apiFetch(url, fresh);
     S.tasks        = data.tasks || [];
     S.credits      = data.credits || [];
     S.rerollCost   = data.reroll_cost ?? null;
@@ -334,7 +334,7 @@ async function loadTasks() {
     renderCredits();
     renderStock();
     renderQuests();
-    loadQuestPrices();
+    loadQuestPrices(fresh);
     startResetCountdown();
     if (!S.tasks.length) emptyMsg.textContent = 'No incomplete tasks found.';
     render();
@@ -346,7 +346,7 @@ async function loadTasks() {
 }
 
 // Cheapest way to buy the quest items the player is missing, from markets and stalls in their region
-async function loadQuestPrices() {
+async function loadQuestPrices(fresh = false) {
   const quests = S.quests;
   const need   = {};
   for (const q of quests) for (const n of q.needs) {
@@ -362,7 +362,7 @@ async function loadQuestPrices() {
   if (p.regionId)          params.push(`regionId=${p.regionId}`);
   if (p.locationX != null) params.push(`x=${p.locationX}`, `z=${p.locationZ}`);
   try {
-    const data = await apiFetch(`/api/quest_prices?${params.join('&')}`);
+    const data = await apiFetch(`/api/quest_prices?${params.join('&')}`, fresh);
     if (S.quests !== quests) return;   // a newer load replaced these quests
     S.questPrices = data.items || {};
     S.questRegion = data.region || '';
@@ -376,7 +376,7 @@ async function loadQuestPrices() {
   renderQuests();
 }
 
-async function loadStalls() {
+async function loadStalls(fresh = false) {
   const { locationX: x, locationZ: z, regionId } = S.player;
   try {
     const params = [`x=${x}`, `z=${z}`];
@@ -388,7 +388,7 @@ async function loadStalls() {
     }
     if (S.watchedStalls.length)  params.push(`watch=${encodeURIComponent(S.watchedStalls.join(','))}`);
     if (S.housedPlayers.length)  params.push(`housing=${encodeURIComponent(S.housedPlayers.join(','))}`);
-    const data = await apiFetch(`/api/stalls?${params.join('&')}`);
+    const data = await apiFetch(`/api/stalls?${params.join('&')}`, fresh);
     S.stalls         = data.stalls || [];
     S.barterSources  = data.barterSources || [];
     S.housingSources = data.housingSources || [];
@@ -660,7 +660,7 @@ function renderStock() {
 // ── Claim recommendation ──────────────────────────────────────────────────────
 // The claims, anywhere in the world, whose markets cover the most of the tasks the player can be given:
 // every task in the tiers they've unlocked, since rerolls and new tasks draw from that pool
-async function loadRecommend() {
+async function loadRecommend(fresh = false) {
   const p = S.player;
   const params = [`player_id=${encodeURIComponent(p.id)}`, `username=${encodeURIComponent(p.username)}`, `range=${S.marketRangeH}`];
   if (p.regionId)          params.push(`regionId=${p.regionId}`);
@@ -668,7 +668,7 @@ async function loadRecommend() {
   const mine = S.recommend = { loading: true };
   renderRecommend();
   try {
-    const data = await apiFetch(`/api/recommend?${params.join('&')}`);
+    const data = await apiFetch(`/api/recommend?${params.join('&')}`, fresh);
     if (S.recommend !== mine) return;   // a newer load replaced this one
     S.recommend = data;
     showWarnings(data.warnings);
@@ -1696,7 +1696,7 @@ function liveApplyStands() {
 // A watched stand's trades changed: reload the stalls for their names and prices
 function liveScheduleStallsReload() {
   clearTimeout(L.stallsTimer);
-  L.stallsTimer = setTimeout(() => { if (S.player && L.key) loadStalls(); }, LIVE_RELOAD_MS);
+  L.stallsTimer = setTimeout(() => { if (S.player && L.key) loadStalls(true); }, LIVE_RELOAD_MS);
 }
 
 function liveRenderSoon() {
@@ -1724,7 +1724,7 @@ function liveScheduleReload(ms) {
     if (!S.player || !L.key) return;
     if (L.reloading) { liveScheduleReload(ms); return; }
     L.reloading = true;
-    try { await loadTasks(); } finally { L.reloading = false; }
+    try { await loadTasks(true); } finally { L.reloading = false; }
   }, ms);
 }
 
@@ -1793,7 +1793,9 @@ function esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-async function apiFetch(url) {
+// The API is cached on Vercel's CDN for a minute or few; fresh adds a unique param so the request runs the function
+async function apiFetch(url, fresh = false) {
+  if (fresh) url += (url.includes('?') ? '&' : '?') + `_=${Date.now()}`;
   const r = await fetch(url);
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));

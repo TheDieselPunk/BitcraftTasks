@@ -42,6 +42,8 @@ from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(__file__))
+CACHE_S = 300   # seconds Vercel's CDN may serve this response from cache
+
 from _lib import api_get, distance, cors_headers, build_inv_map, build_name_maps, get_claims, get_player_housing_items, \
     get_skill_levels
 from quest_prices import get_all_stalls, stall_offers, stall_label, stall_stock
@@ -555,7 +557,7 @@ class handler(BaseHTTPRequestHandler):
     def _send(self, status, body):
         payload = json.dumps(body).encode()
         self.send_response(status)
-        for k, v in cors_headers().items():
+        for k, v in cors_headers(status, body, CACHE_S).items():
             self.send_header(k, v)
         self.send_header('Content-Length', str(len(payload)))
         self.end_headers()

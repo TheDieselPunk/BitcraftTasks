@@ -12,6 +12,8 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 sys.path.insert(0, os.path.dirname(__file__))
+CACHE_S = 30   # seconds Vercel's CDN may serve this response from cache
+
 from _lib import get_player, cors_headers
 
 
@@ -39,7 +41,7 @@ class handler(BaseHTTPRequestHandler):
     def _send(self, status, body):
         payload = json.dumps(body).encode()
         self.send_response(status)
-        for k, v in cors_headers().items():
+        for k, v in cors_headers(status, body, CACHE_S).items():
             self.send_header(k, v)
         self.send_header('Content-Length', str(len(payload)))
         self.end_headers()
