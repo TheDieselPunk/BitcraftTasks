@@ -2,7 +2,8 @@
 GET /api/stalls?x=X&z=Z&range=N&regionId=R
 
 Returns:
-  - nearby: stalls within `range` units of player, with sell-side orders
+  - stalls: every Trader Stand in the player's region, nearest first, with sell-side orders.
+    The page follows their position and stock live through the relay.
   - nearestMarket: the closest claim that has stalls, with a price map
     {item_id: {name, minPrice, totalQty}} for all items sold there
 """
@@ -18,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(__file__))
 CACHE_S = 120   # seconds Vercel's CDN may serve this response from cache
 
-from _lib import api_get, distance, cors_headers, build_inv_map, get_player_housing_items
+from _lib import api_get, distance, cors_headers, get_player_housing_items
 
 INFINITE_STOCK = 2_000_000_000
 
@@ -105,10 +106,6 @@ class handler(BaseHTTPRequestHandler):
 
         region_id = params.get('regionId', [None])[0]
 
-        # Watched trader names — always included regardless of range
-        watch_raw  = params.get('watch', [''])[0]
-        watch_names = {n.strip().lower() for n in watch_raw.split(',') if n.strip()}
-
         # Housing player names — inventories to include as item sources
         housing_raw   = params.get('housing', [''])[0]
         housing_names = [n.strip() for n in housing_raw.split(',') if n.strip()]
@@ -147,7 +144,7 @@ class handler(BaseHTTPRequestHandler):
                 if cx is not None and cz is not None and cn and cn not in claim_coords:
                     claim_coords[cn] = (float(cx), float(cz))
 
-            nearby        = []   # watched trader stands only
+            nearby        = []   # every Trader Stand in the region
             all_with_dist = []   # all coord stalls with sell orders, for nearest market
 
             for stall in stalls_raw:
@@ -155,11 +152,7 @@ class handler(BaseHTTPRequestHandler):
                 if not owner:
                     continue   # skip barter stalls — covered by claim inventory API
 
-                nickname   = stall.get('nickname', '') or ''
-                is_watched = bool(watch_names and (
-                    owner.lower()    in watch_names or
-                    nickname.lower() in watch_names
-                ))
+                nickname = stall.get('nickname', '') or ''
 
                 sx = stall.get('locationX')
                 sz = stall.get('locationZ')
@@ -179,37 +172,16 @@ class handler(BaseHTTPRequestHandler):
                     'x':             float(sx) if has_coords else None,
                     'z':             float(sz) if has_coords else None,
                     'items':         items,
-                    'watched':       is_watched,
                 }
 
                 if items and has_coords:
                     all_with_dist.append(entry)
 
-                if is_watched:
+                if nickname:   # only Trader Stands have a nickname here
                     nearby.append(entry)
 
             nearby.sort(key=lambda s: (s['distance'] is None, s['distance'] or 0))
             all_with_dist.sort(key=lambda s: s['distance'])
-
-            # Cross-check watched stall items against owner's live inventory.
-            # Removes listings where the owner has 0 of the item anywhere (stale remainingStock).
-            watched_eids = {s['ownerEntityId'] for s in nearby if s.get('ownerEntityId')}
-            if watched_eids:
-                def _fetch_inv(eid):
-                    try:
-                        return eid, api_get(f'/api/players/{eid}/inventories')
-                    except Exception:
-                        return eid, {}
-
-                with ThreadPoolExecutor(max_workers=5) as pool:
-                    raw_inv_maps = dict(pool.map(_fetch_inv, watched_eids))
-
-                for s in nearby:
-                    eid = s.get('ownerEntityId', '')
-                    if eid and eid in raw_inv_maps:
-                        # Check only the specific stall container; fall back to all bags
-                        inv = build_inv_map(raw_inv_maps[eid], s.get('stallEntityId'))
-                        s['items'] = [it for it in s['items'] if inv.get(str(it['id']), 0) > 0]
 
             # Build nearest market: the closest claim with stalls
             nearest_market = None

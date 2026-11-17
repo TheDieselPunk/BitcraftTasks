@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.16.1';
+const APP_VERSION = '1.17.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -42,7 +42,6 @@ const S = {
   stallsLoaded:  false,
   resetTimer:    null,
   notifyArmed:   false,
-  watchedStalls:   JSON.parse(localStorage.getItem('bcTasks_watched') || '[]'),
   housedPlayers:   JSON.parse(localStorage.getItem('bcTasks_housing') || '[]'),
   selectedClaimId: localStorage.getItem('bcTasks_selectedClaim') || null,
   allClaims:       [],
@@ -67,10 +66,6 @@ const questsSection = $('quests-section');
 const recSection    = $('recommend-section');
 const stockSection  = $('stock-section');
 const expSection    = $('exp-section');
-const watchRow      = $('watch-row');
-const watchInput    = $('watch-input');
-const btnWatchAdd   = $('btn-watch-add');
-const watchChips    = $('watch-chips');
 const housingRow    = $('housing-row');
 const housingInput  = $('housing-input');
 const btnHousingAdd = $('btn-housing-add');
@@ -92,8 +87,9 @@ const tipBox        = $('tip-box');
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 buildHeader();
-renderWatchChips();
 renderHousingChips();
+
+localStorage.removeItem('bcTasks_watched');   // the old Watch Traders list
 
 // Restore saved player name
 const _savedName = localStorage.getItem('bcTasks_username');
@@ -115,36 +111,6 @@ btnFilter.addEventListener('click', () => {
   render();
 });
 btnCsv.addEventListener('click', downloadCsv);
-
-// ── Watched stalls ─────────────────────────────────────────────────────────────
-function saveWatched() {
-  localStorage.setItem('bcTasks_watched', JSON.stringify(S.watchedStalls));
-}
-
-function addWatch(name) {
-  const n = name.trim();
-  if (!n || S.watchedStalls.includes(n)) return;
-  S.watchedStalls.push(n);
-  saveWatched();
-  renderWatchChips();
-  if (S.player?.locationX != null) loadStalls();
-}
-
-function removeWatch(name) {
-  S.watchedStalls = S.watchedStalls.filter(n => n !== name);
-  saveWatched();
-  renderWatchChips();
-  if (S.player?.locationX != null) loadStalls();
-}
-
-function renderWatchChips() {
-  watchChips.innerHTML = S.watchedStalls.map(n =>
-    `<span class="watch-chip">${esc(n)}<button onclick='removeWatch(${JSON.stringify(n)})' title="Remove">×</button></span>`
-  ).join('');
-}
-
-btnWatchAdd.addEventListener('click', () => { addWatch(watchInput.value); watchInput.value = ''; });
-watchInput.addEventListener('keydown', e => { if (e.key === 'Enter') { addWatch(watchInput.value); watchInput.value = ''; } });
 
 // ── Housed players ─────────────────────────────────────────────────────────────
 function saveHoused() {
@@ -247,7 +213,6 @@ async function doSearch() {
       localStorage.setItem('bcTasks_selectedClaimName', claimLabel);
     }
     playerStrip.classList.add('visible');
-    watchRow.classList.add('visible');
     housingRow.classList.add('visible');
     toolbar.classList.add('visible');
     if (Notification.permission === 'default') Notification.requestPermission();
@@ -286,6 +251,18 @@ async function load(fresh = false) {   // fresh: skip the CDN cache (Refresh but
   ]);
 
   setStatus('');
+}
+
+// A Trader Stand counts when it's within the market range of the selected claim (or of the player, with
+// no claim picked). At 0h that's the claim itself. Its live position is used when the relay has one.
+const STAND_CLAIM_RADIUS_H = 10;
+function standInRange(stall) {
+  const x = stall.live ? stall.live_x : stall.x, z = stall.live ? stall.live_z : stall.z;
+  if (x == null || z == null) return false;
+  const sel = S.allClaims.find(c => c.id === S.selectedClaimId);
+  const cx  = sel?.x ?? S.player?.locationX, cz = sel?.z ?? S.player?.locationZ;
+  if (cx == null || cz == null) return true;
+  return Math.hypot(x - cx, z - cz) / 3 <= Math.max(S.marketRangeH, STAND_CLAIM_RADIUS_H);
 }
 
 function getClaimsInRange(rangeH) {
@@ -386,7 +363,6 @@ async function loadStalls(fresh = false) {
       const selClaim = (S.allClaims || []).find(c => c.id === S.selectedClaimId);
       if (selClaim) params.push(`claimName=${encodeURIComponent(selClaim.name)}`);
     }
-    if (S.watchedStalls.length)  params.push(`watch=${encodeURIComponent(S.watchedStalls.join(','))}`);
     if (S.housedPlayers.length)  params.push(`housing=${encodeURIComponent(S.housedPlayers.join(','))}`);
     const data = await apiFetch(`/api/stalls?${params.join('&')}`, fresh);
     S.stalls         = data.stalls || [];
@@ -395,7 +371,7 @@ async function loadStalls(fresh = false) {
     S.marketMap     = data.nearestMarket?.items  || {};
     S.marketClaim   = data.nearestMarket || null;
     S.stallsLoaded  = true;
-    liveWatchStands();      // follow the watched Trader Stands live
+    liveWatchStands();      // follow the region's Trader Stands live
     L.dirty = false;        // render() below covers it
     showWarnings(data.warnings);
 
@@ -418,6 +394,7 @@ function buildStallMap() {
   const map = {};
   for (const stall of S.stalls.filter(s => s.items?.length)) {
     if (stall.live && !stall.deployed) continue;   // the relay says this stand is packed up
+    if (!standInRange(stall)) continue;
     for (const it of stall.items) {
       // live: what the stand actually holds, capped by the trade's remaining stock
       const stock = stall.live ? (it.stock == null ? it.stock_live : Math.min(it.stock, it.stock_live)) : it.stock;
@@ -430,7 +407,6 @@ function buildStallMap() {
         owner:       stall.owner,
         claimName:   stall.claimName,
         distance:    stall.distance,
-        watched:     stall.watched || false,
         isBarter:    false,
         qty:         it.qty,
         stock,
@@ -447,7 +423,6 @@ function buildStallMap() {
         owner:       '',
         claimName:   bs.claimName,
         distance:    bs.distance,
-        watched:     false,
         isBarter:    true,
         qty:         itemData.qty,
         stock:       itemData.qty,
@@ -466,7 +441,6 @@ function buildStallMap() {
           owner:        hs.playerName,
           claimName:    '',
           distance:     null,
-          watched:      false,
           isBarter:     false,
           isHousing:    true,
           qty:          qty,
@@ -478,7 +452,6 @@ function buildStallMap() {
   }
 
   for (const k of Object.keys(map)) map[k].sort((a, b) => {
-    if (a.watched !== b.watched) return a.watched ? -1 : 1;
     if (a.isHousing !== b.isHousing) return a.isHousing ? 1 : -1;
     if (a.isBarter  !== b.isBarter)  return a.isBarter  ? 1 : -1;
     if (a.distance == null && b.distance == null) return 0;
@@ -1112,7 +1085,12 @@ function render() {
 
 function decorateTask(task, stallMap) {
   const items = task.items.map(item => {
-    const nearby = (stallMap[item.id] || []).filter(e => e.stock == null || e.stock >= item.qty);
+    // A stall with some stock but not enough for what's left to buy is still listed, marked partial;
+    // only stalls that can cover it all count towards cost, profit and "completable"
+    const toBuy  = item.qty - Math.min(item.qty, item.inv_have || 0);
+    const nearby = (stallMap[item.id] || [])
+      .filter(e => e.stock == null || e.stock > 0)
+      .map(e => ({ ...e, partial: e.stock != null && e.stock < toBuy }));
     return { ...item, stall_matches: nearby };
   });
 
@@ -1124,7 +1102,7 @@ function decorateTask(task, stallMap) {
     const candidates = [];
     if (item.market_price != null) candidates.push(item.market_price);
     for (const m of (item.stall_matches || [])) {
-      if (m.isBarter) continue;
+      if (m.isBarter || m.partial) continue;
       const sp = hexPrice(m.price_parts);
       if (sp != null) candidates.push(sp);
     }
@@ -1137,7 +1115,7 @@ function decorateTask(task, stallMap) {
     } else if (buyQty > 0) costKnown = false;
     else unpriced.push(item.name);
   }
-  const hasSource = items.some(i => i.stall_matches.length > 0 || i.market_price != null);
+  const hasSource = items.some(i => i.stall_matches.some(m => !m.partial) || i.market_price != null);
   const known  = costKnown && hasSource;
   const cost   = known ? buyCost + ownedValue : null;
   const profit = cost != null ? task.reward - cost : null;
@@ -1172,7 +1150,7 @@ function sortVal(task) {
 function isCompletable(task) {
   return task.items.every(item =>
     item.inv_have >= item.qty ||
-    (item.stall_matches || []).length > 0 ||
+    (item.stall_matches || []).some(m => !m.partial) ||
     item.market_price != null ||
     item.craft_info?.status === 'yes'
   );
@@ -1221,16 +1199,17 @@ function renderRow(task) {
       const profit    = coinPrice != null
         ? task.reward - coinPrice * (item.qty - ownQty) - (item.unit_price ?? coinPrice) * ownQty
         : null;
-      const profitStr = profit != null
+      const profitStr = m.partial
+        ? ` <span class="stock-short" data-tip="${esc(`Only ${m.stock.toLocaleString()} in stock; you need ${(item.qty - ownQty).toLocaleString()} more`)}">only ${m.stock.toLocaleString()} left</span>`
+        : profit != null
         ? ` <span class="${profit >= 0 ? 'profit-pos' : 'profit-neg'}">(${HEX}${profit.toLocaleString()})</span>`
         : '';
-      const watchedMark = m.watched ? `<span style="color:#f0a500" title="Watched">★ </span>` : '';
       const displayName = m.name !== m.owner && m.name ? m.name : m.owner;
       const standMark = !m.stand ? ''
         : m.liveSpot ? `<span class="stand-live" data-tip="${esc(`Live: set up at N ${Math.round(m.liveSpot.z / 3)}, E ${Math.round(m.liveSpot.x / 3)}` +
                          `, ${m.liveSpot.stock.toLocaleString()} in stock`)}">●</span>`
         : `<span data-tip="Trader Stands can be moved, so this one ${STAND_NOTE}">${STAND_MARK}</span>`;
-      return `${watchedMark}<span class="stall-name">${esc(displayName)}</span>${standMark}${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
+      return `<span class="stall-name">${esc(displayName)}</span>${standMark}${ph ? ' · ' + ph : ''}${profitStr} ${distStr}`;
     });
     return lines.join('<br>');
   }).join('<br>');
@@ -1366,6 +1345,7 @@ const RELAYS          = [{ host: 'relay.bitjita.com' }, { host: 'relay.bitcrafts
 const LIVE_RELOAD_MS  = 4000;                  // gather a burst of changes into one reload
 const LIVE_RETRY_MS   = [15000, 30000, 60000]; // BitJita can lag: reload again while new tasks are missing
 const LIVE_RENDER_MS  = 300;                   // inventory changes come in bursts while playing
+const LIVE_STALLS_RELOAD_MS = 15000;           // gather trade changes across all the region's stands
 const liveEl          = $('live-status');
 const L = {
   ws: null, key: null, ready: false, relay: 0, fails: 0,
@@ -1479,19 +1459,19 @@ const LIVE_TABLES = {
     cols: ['entity_id', 'pockets', 'inventory_index', 'cargo_index', 'owner_entity_id', 'player_owner_entity_id'],
     map:  'bags',    read: v => ({ key: String(v[0]), items: liveBagItems(v[1]), owner: String(v[4]), playerOwner: String(v[5]) }),
   },
-  // where a watched Trader Stand is now; a packed-up stand has no row
+  // where a Trader Stand is now; a packed-up stand has no row
   mobile_entity_state: {
     cols: ['entity_id', 'chunk_index', 'timestamp', 'location_x', 'location_z'],
     map:  'positions', read: v => ({ key: String(v[0]), x: Number(v[3]) / 1000, z: Number(v[4]) / 1000 }),
   },
-  // a watched stand's trades: only watched for changes, which reload /api/stalls for names and prices
+  // a stand's trades: only followed for changes, which reload /api/stalls for names and prices
   trade_order_state: {
     cols: ['entity_id', 'shop_entity_id', 'remaining_stock'],
     map:  'orders',  read: v => ({ key: String(v[0]), shop: String(v[1]), stock: v[2] }),
   },
 };
 
-// Watched Trader Stands to follow: their position, trades and stock (the stand's own inventory)
+// The region's Trader Stands to follow: their position, trades and stock (the stand's own inventory)
 function liveStandIds() {
   return [...new Set(S.stalls.filter(s => s.stand && /^\d+$/.test(String(s.stallEntityId || '')))
     .map(s => String(s.stallEntityId)))].sort();
@@ -1520,7 +1500,7 @@ function liveSubscribe() {
   L.ws.send(JSON.stringify({ Subscribe: { query_strings: liveQueries(), request_id: ++L.requestId } }));
 }
 
-// Called when the watched stands change: follow the new set
+// Called when the region's stands change: follow the new set
 function liveWatchStands() {
   if (liveStandIds().join() !== L.sentStands.join()) liveSubscribe();
   liveApplyStands();
@@ -1645,7 +1625,7 @@ function liveApplyInventory() {
   const playerId = L.key.split(':')[1];
   const delta = {};
   for (const [bag, row] of L.bags) {
-    if (row.owner !== playerId && row.playerOwner !== playerId) continue;   // a watched stand's stock
+    if (row.owner !== playerId && row.playerOwner !== playerId) continue;   // a Trader Stand's stock
     const base = S.invBags[bag] || {};
     for (const id of new Set([...Object.keys(base), ...Object.keys(row.items)])) {
       const d = (row.items[id] || 0) - (base[id] || 0);
@@ -1664,7 +1644,7 @@ function liveApplyInventory() {
   for (const q of S.quests) for (const n of q.needs) set(n, 'have', n.id);
 }
 
-// Watched Trader Stands: where they are now, whether they're packed up, and what's in stock.
+// Trader Stands: where they are now, whether they're packed up, and what's in stock.
 // stall.live is set once the relay has answered for that stand.
 function liveApplyStands() {
   if (!S.stallsLoaded) return;
@@ -1693,10 +1673,11 @@ function liveApplyStands() {
   }
 }
 
-// A watched stand's trades changed: reload the stalls for their names and prices
+// A stand's trades changed: reload the stalls for their names and prices (debounced: with every
+// stand in the region followed, trades change often)
 function liveScheduleStallsReload() {
   clearTimeout(L.stallsTimer);
-  L.stallsTimer = setTimeout(() => { if (S.player && L.key) loadStalls(true); }, LIVE_RELOAD_MS);
+  L.stallsTimer = setTimeout(() => { if (S.player && L.key) loadStalls(true); }, LIVE_STALLS_RELOAD_MS);
 }
 
 function liveRenderSoon() {
