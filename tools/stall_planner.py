@@ -12,11 +12,11 @@ How it decides:
   - Supply: what other players sell at the market claims (--markets) right now: market sell orders and
     Hex Coin stall trades at those claims, stall stock checked against what the stall holds.
   - An item is worth selling only where demand exceeds that supply (the shortfall).
-  - Ranking: coins per action. "Brings in" is every coin the trades put in your stall; "Actions" is every
-    gather and craft it takes to stock them. An item with no recipe (gathered, fished, hunted or dropped)
-    counts one action per unit; a craft counts one plus its ingredients, by the recipe that takes least.
-    So 10 Muddy Guppi is 10 actions and one Rough Leather Sheeting about 50. A drop that takes several
-    kills per unit is undercounted, as the item data can't tell a drop from a gather.
+  - Ranking: coins per hour. "Brings in" is every coin the trades put in your stall; "Hours" is the time
+    to gather and craft what they need, from the chain calculator in your Bitcraft Effort project
+    (--effort-dir) at your toolbelt's tool powers: node odds per health point, crafting actions, cargo
+    processing and rare results like Briny Linus Scale from Briny Linus Products. Items it has no chain
+    for (monster drops) are listed last, unranked.
   - Price: Trader Stand trades are bundles, so each trade is a task's whole quantity for a lump sum,
     e.g. "10 Muddy Guppi for 60" for Alesi's 65-coin task. The price is the task's reward less the buyer's
     cut (--profit coins or --margin of the reward, whichever is more) and less the rest of the task bought
@@ -152,6 +152,74 @@ def item_detail(key):
         return {'recipes': [], 'gathered': False, 'median': None, 'failed': True}
 
 
+EFFORT_DIR = os.path.join(HERE, '..', '..', 'Bitcraft Effort')   # your Bitcraft Effort project
+
+
+def _load_module(name, path):
+    """Import a file under its own module name: both projects have an api/_lib.py."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class Effort:
+    """
+    Time and stamina to produce items, from the Bitcraft Effort project's chain calculator: node extraction
+    odds per health point and tool power, crafting actions, cargo processing and rare processing results
+    (Briny Linus Scale from Briny Linus Products), all from its game data (data/recipes.json, game_data.json).
+    """
+
+    def __init__(self, project_dir, tools):
+        api = os.path.join(project_dir, 'api')
+        if not os.path.exists(os.path.join(api, '_effort_calc.py')):
+            raise SystemExit(f'Bitcraft Effort project not found at {os.path.abspath(project_dir)}; pass --effort-dir')
+        self.calc   = _load_module('effort_calc', os.path.join(api, '_effort_calc.py'))
+        self.skills = _load_module('effort_lib', os.path.join(api, '_lib.py')).SKILL_NAMES
+        # Its GitHub job refreshes the data every 6 hours; this copy is only as fresh as the last git pull
+        age_days = (time.time() - os.path.getmtime(os.path.join(project_dir, 'data', 'recipes.json'))) / 86400
+        if age_days > 2:
+            log(f'  warning: the Bitcraft Effort recipe data is {age_days:.0f} days old; '
+                f'run "git pull" in {os.path.abspath(project_dir)} for the latest')
+        with open(os.path.join(project_dir, 'data', 'recipes.json'), encoding='utf-8') as f:
+            self.recipes = json.load(f)
+        with open(os.path.join(project_dir, 'data', 'game_data.json'), encoding='utf-8') as f:
+            self.game = json.load(f)
+        self.tools = tools
+
+    def of(self, key, units):
+        """{seconds, stamina, outside: [names it couldn't trace]} to produce `units` of the item.
+        seconds is None when it has no chain at all (a monster drop, a cargo item)."""
+        if key[1] != 'item' or units <= 0:
+            return {'seconds': None, 'stamina': None, 'outside': []}
+        acc   = self.calc.calculate_effort(key[0], units, self.recipes, self.game, self.tools, self.skills)
+        prof  = acc.by_profession.values()
+        secs  = sum(p['gathering_time'] + p['crafting_time'] for p in prof)
+        stam  = sum(p['gathering_stamina'] + p['crafting_stamina'] for p in prof)
+        out   = [v['name'] or k for k, v in acc.ingredient_costs.items()]
+        return {'seconds': secs or None, 'stamina': stam, 'outside': out}
+
+
+def toolbelt(player_id):
+    """Your tools by tool type, {type: {level, power, name, tier}}, the way the Bitcraft Effort project reads them."""
+    data, tools = soft(f'/api/players/{player_id}/inventories') or {}, {}
+    lookup = data.get('items', {})
+    for bag in data.get('inventories', []):
+        if (bag.get('inventoryName') or '').lower() != 'toolbelt':
+            continue
+        for pocket in bag.get('pockets', []):
+            c = pocket.get('contents')
+            info = lookup.get(str(c['itemId']), {}) if c else {}
+            tt, level = info.get('toolType'), info.get('toolLevel')
+            if tt is None or level is None:
+                continue
+            if tt not in tools or level > tools[tt]['level']:
+                tools[tt] = {'level': level, 'power': info.get('toolPower') or 0, 'name': info.get('name', ''),
+                             'tier': info.get('tier')}
+    return tools
+
+
 class Difficulty:
     """Crafting steps from gathered materials, by the easiest recipe, for every item in a recipe tree."""
 
@@ -169,36 +237,6 @@ class Difficulty:
             if todo:
                 log(f'  recipes: {len(seen)} items read, {len(todo)} more ingredients to look up')
         return seen
-
-    def work(self, key, path=()):
-        """
-        Actions to get one unit from scratch: an item with no recipe (gathered, fished, hunted or dropped) is
-        one action per unit, a craft is one action plus its ingredients' work, divided by what it makes.
-        By the recipe that takes the least work. Rough Leather Sheeting comes to about 50, a fish to 1.
-        """
-        memo = self.__dict__.setdefault('work_memo', {})
-        if key in memo:
-            return memo[key]
-        if key in path or len(path) > MAX_DEPTH:
-            return None   # a loop: this route doesn't bottom out
-        best = None
-        recipes = item_detail(key)['recipes']
-        for r in recipes:
-            total = 1
-            for i, t, q in r['inputs']:
-                w = self.work((i, t), path + (key,))
-                if w is None:
-                    total = None
-                    break
-                total += w * q
-            if total is not None and (best is None or total / r['makes'] < best):
-                best = total / r['makes']
-        if best is None:
-            if recipes and path:
-                return None   # every recipe loops back: let the caller pick another
-            best = 1.0
-        memo[key] = best
-        return best
 
     def parts_cost(self, key, going, path=()):
         """
@@ -356,12 +394,21 @@ def buyer_cut(reward, profit, margin):
     return max(profit, round(reward * margin))
 
 
+def round_price(ceiling, floor):
+    """
+    A stall price ending in 0: the ceiling rounded down to a multiple of 10, so the buyer keeps a little more.
+    When that would drop below the floor (or to 0), the ceiling itself, as no round price fits between them.
+    """
+    price = ceiling // 10 * 10
+    return price if price >= floor and price > 0 else ceiling
+
+
 def price_item(key, tasks, going, profit, margin, shortfall):
     """
     Trader Stand trades for `key`: each one is a task's whole quantity (a bundle) for a price in Hex Coin.
     A task's ceiling for the bundle is its reward, less the buyer's cut, less the rest of the task bought at
     the going price. The floor is the bundle at the going price. Tasks asking for the same quantity share a
-    trade, priced where it brings in the most.
+    trade, priced where it brings in the most, rounded down to end in 0 where that stays above the floor.
     Returns ([{bundle, price, trades, revenue, buyers}], best ceiling seen, its bundle) — trades empty when no
     task's ceiling reaches the floor.
     """
@@ -381,9 +428,10 @@ def price_item(key, tasks, going, profit, margin, shortfall):
             if top[0] is None or c / bundle > top[0] / top[1]:
                 top = (c, bundle)
         best = None
-        for price, _ in asks:
-            if price < floor:
+        for ceiling, _ in asks:
+            if ceiling < floor:
                 continue
+            price = round_price(ceiling, floor)
             n = min(sum(1 for c, _ in asks if c >= price), math.ceil(left / bundle))
             if n > 0 and (not best or n * price > best['revenue']):
                 best = {'bundle': bundle, 'price': price, 'trades': n, 'revenue': n * price,
@@ -402,6 +450,13 @@ def fmt(n):
     return f'{n:,.1f}'.rstrip('0').rstrip('.') if isinstance(n, float) else f'{n:,}'
 
 
+def time_text(hours):
+    """'45 min' or '7.5 h'."""
+    if hours is None:
+        return '—'
+    return f'{hours * 60:.0f} min' if hours < 1 else f'{hours:,.1f} h'
+
+
 def trades_text(r):
     """'10 for 60 ×4, 5 for 28 ×1': each Trader Stand trade to set up, and how many times to stock it."""
     return ', '.join(f"{t['bundle']:,} for {t['price']:,} ×{t['trades']}" for t in r['trades'])
@@ -413,20 +468,33 @@ def best_text(r):
 
 
 def print_table(rows, skipped):
-    head = ['#', 'Item', 'Coins/action', 'Brings in', 'Actions', 'Trades (qty for coins ×stock)', 'Short', 'Going/u',
-            'Parts/u', 'Work/u', 'Buyers']
-    data = [[str(n), r['name'][:32], fmt(round(r['rate'], 1)), fmt(r['revenue']), fmt(round(r['work'])), trades_text(r)[:44],
-             fmt(r['shortfall']), fmt(r['going']), fmt(r['parts'] and round(r['parts'], 1)), fmt(round(r['work_u'], 1)),
-             ', '.join(r['buyers'])[:40]] for n, r in enumerate(rows, 1)]
+    head = ['#', 'Item', 'Coins/hr', 'Brings in', 'Time', 'Trades (qty for coins ×stock)', 'Short', 'Going/u',
+            'Parts/u', 'Buyers']
+    data = [[str(n), r['name'][:32], fmt(r['rate'] and round(r['rate'])), fmt(r['revenue']),
+             time_text(r['hours']), trades_text(r)[:44], fmt(r['shortfall']), fmt(r['going']),
+             fmt(r['parts'] and round(r['parts'], 1)), ', '.join(r['buyers'])[:40]] for n, r in enumerate(rows, 1)]
     widths = [max(len(h), *(len(d[i]) for d in data)) if data else len(h) for i, h in enumerate(head)]
-    line = lambda cells: '  '.join(c.ljust(w) if i in (1, 5, 10) else c.rjust(w) for i, (c, w) in enumerate(zip(cells, widths)))
+    line = lambda cells: '  '.join(c.ljust(w) if i in (1, 5, 9) else c.rjust(w) for i, (c, w) in enumerate(zip(cells, widths)))
     print(line(head))
     print('  '.join('-' * w for w in widths))
     for d in data:
         print(line(d))
+    unknown = [r['name'] for r in rows if r['rate'] is None]
+    if unknown:
+        print(f'\nNo production chain in the effort data, so ranked last ({len(unknown)}): ' + ', '.join(unknown))
     if skipped:
         print(f'\nShort nearby, but no member profits at the going price or what its parts are worth ({len(skipped)}): '
               + ', '.join(f"{r['name']} (going {fmt(r['going'])}/u, best a buyer could pay {best_text(r)})" for r in skipped[:15]))
+
+
+def sub_text(r):
+    """The line under an item's name: its recipe tree, and what the effort data couldn't trace."""
+    if r['hours'] is None:
+        return 'No production chain in the effort data (a monster drop?), so ranked last'
+    text = r['chain'] or 'gathered'
+    if r['outside']:
+        text += ' · not counted: ' + ', '.join(r['outside'])
+    return text
 
 
 def write_html(path, rows, skipped, meta):
@@ -436,12 +504,13 @@ def write_html(path, rows, skipped, meta):
     for n, r in enumerate(rows, 1):
         mine = ', '.join(f'{u:,} @ {p:,}' for p, u in r['mine']) if r['mine'] else ''
         body.append('<tr>' + cell(n, 'num') +
-                    f'<td><b>{html.escape(r["name"])}</b><div class="sub">{html.escape(r["chain"] or ("gathered" if r["steps"] == 0 else ""))}</div></td>' +
-                    cell(fmt(round(r['rate'], 1)), 'num price') + cell(fmt(r['revenue']), 'num') +
-                    cell(fmt(round(r['work'])), 'num') + cell(trades_text(r), 'price') + cell(fmt(r['units']), 'num') +
+                    f'<td><b>{html.escape(r["name"])}</b><div class="sub">{html.escape(sub_text(r))}</div></td>' +
+                    cell(fmt(r['rate'] and round(r['rate'])), 'num price') + cell(fmt(r['revenue']), 'num') +
+                    cell(time_text(r['hours']), 'num') + cell(fmt(r['stamina'] and round(r['stamina'])), 'num') +
+                    cell(trades_text(r), 'price') + cell(fmt(r['units']), 'num') +
                     cell(fmt(r['demand']), 'num') + cell(fmt(r['supply']), 'num') + cell(fmt(r['shortfall']), 'num') +
                     cell(fmt(r['going']), 'num') + cell(fmt(r['parts'] and round(r['parts'], 1)), 'num') +
-                    cell(fmt(round(r['work_u'], 1)), 'num') + cell(fmt(r['tier']), 'num') +
+                    cell(fmt(r['tier']), 'num') +
                     cell(', '.join(r['buyers'])) + cell(mine) + '</tr>')
     skipped_html = ''.join(
         f'<li>{html.escape(r["name"])}: short {fmt(r["shortfall"])}, going {fmt(r["going"])} each, '
@@ -462,9 +531,9 @@ h2 {{ font-size:15px; margin:28px 0 8px; }} li {{ color:var(--mute); }}
 </style></head><body>
 <h1>Stall planner</h1>
 <p class="meta">{html.escape(meta)}</p>
-<div class="wrap"><table><thead><tr><th>#</th><th>Item</th><th>Coins per action</th><th>Brings in</th><th>Actions</th>
+<div class="wrap"><table><thead><tr><th>#</th><th>Item</th><th>Coins per hour</th><th>Brings in</th><th>Time</th><th>Stamina</th>
 <th>Trades to set up (qty for coins ×stock)</th><th>Units</th><th>Members need</th><th>Sold nearby</th><th>Short</th>
-<th>Going price (each)</th><th>Parts worth (each)</th><th>Actions (each)</th><th>Tier</th><th>Buyers</th><th>You list now</th></tr></thead>
+<th>Going price (each)</th><th>Parts worth (each)</th><th>Tier</th><th>Buyers</th><th>You list now</th></tr></thead>
 <tbody>{''.join(body)}</tbody></table></div>
 {f'<h2>Short nearby, but no member profits at the going price or what its parts are worth</h2><ul>{skipped_html}</ul>' if skipped else ''}
 </body></html>"""
@@ -484,6 +553,8 @@ def main():
                     help="share of a task's reward the buyer keeps, when that's more than --profit (default 0.08)")
     ap.add_argument('--active-days', type=float, default=7, help='only members signed in within this many days (default 7)')
     ap.add_argument('--min-steps', type=int, default=0, help='leave out items easier than this many crafting steps')
+    ap.add_argument('--effort-dir', default=EFFORT_DIR,
+                    help='your Bitcraft Effort project, whose chain calculator times each item (default: next to this repo)')
     ap.add_argument('--html', nargs='?', const=os.path.join(HERE, 'stall_plan.html'),
                     help='also write an HTML report (default tools/stall_plan.html) and open it')
     args = ap.parse_args()
@@ -562,6 +633,10 @@ def main():
         if value.get(k) is None:
             value[k] = diff.parts_cost(k, going)
 
+    tools  = toolbelt(me_id)
+    effort = Effort(args.effort_dir, tools)
+    log(f"Timing each item with the Bitcraft Effort chain calculator ({len(tools)} tools on your toolbelt)...")
+
     rows, skipped = [], []
     for k, gap in short.items():
         info  = names.get(k, {})
@@ -576,18 +651,20 @@ def main():
         if trades:
             units   = sum(t['bundle'] * t['trades'] for t in trades)
             revenue = sum(t['revenue'] for t in trades)
-            work    = units * diff.work(k)
-            rows.append({**row, 'trades': trades, 'units': units, 'revenue': revenue, 'work_u': diff.work(k),
-                         'work': work, 'rate': revenue / work,
+            e       = effort.of(k, units)
+            hours   = e['seconds'] / 3600 if e['seconds'] else None
+            rows.append({**row, 'trades': trades, 'units': units, 'revenue': revenue, 'hours': hours,
+                         'stamina': e['stamina'], 'outside': e['outside'], 'rate': revenue / hours if hours else None,
                          'buyers': sorted({m for t in trades for m in t['buyers']})})
         else:
             skipped.append({**row, 'best': top})
-    # Coins that land in the stall for each gather or craft it takes to stock it
-    rows.sort(key=lambda r: (-r['rate'], -r['revenue']))
+    # Coins that land in the stall per hour it takes to stock it; items the effort data can't time go last
+    rows.sort(key=lambda r: (r['rate'] is None, -(r['rate'] or 0), -r['revenue']))
     skipped.sort(key=lambda r: -r['shortfall'])
 
     meta = (f"{len(active)} active {claim['name']} members, {len(tasks)} open tasks · supply at "
             f"{' + '.join(market_names)} · buyer keeps {args.profit} coins or {args.margin:.0%} of the reward · "
+            f"timed at your toolbelt's powers · "
             f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f'\n{meta}\n')
     print_table(rows, skipped)
