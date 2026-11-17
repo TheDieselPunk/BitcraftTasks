@@ -186,6 +186,27 @@
     #recommend-section { padding: 4px 20px 8px; font-size: .75rem; }
     #recommend-section:empty { display: none; }
     #recommend-section .exp-label { display: block; margin-bottom: 4px; }
+    #stock-section { padding: 4px 20px 8px; font-size: .75rem; }
+    #stock-section:empty { display: none; }
+    #stock-section .exp-label { display: block; margin-bottom: 4px; }
+    .stock-grid   { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; }
+    .stock-card   { background: #0b0b1a; border: 1px solid #1a1a3a; border-radius: 6px; padding: 6px 10px 8px; min-width: 0; }
+    .stock-head   { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; margin-bottom: 2px; }
+    .stock-forced { color: #52c46a; font-size: .62rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+                    border: 1px solid #1f4a2a; border-radius: 3px; padding: 0 4px; cursor: default; }
+    .stock-cover  { color: #666688; font-size: .7rem; margin-bottom: 4px; }
+    .stock-cover span { font-size: .7rem; }
+    .stock-row    { display: grid; grid-template-columns: minmax(0, 1fr) 90px auto; gap: 8px; align-items: center; padding: 2px 0; cursor: default; }
+    .stock-name   { color: #c8c8dc; font-size: .7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .stock-bar    { height: 7px; background: #15152e; border-radius: 4px; overflow: hidden; }
+    .stock-fill   { display: block; height: 100%; border-radius: 4px; }
+    .stock-ok     { background: #52c46a; }
+    .stock-part   { background: #f0a500; }
+    .stock-none   { background: transparent; }
+    .stock-num    { font-size: .7rem; font-weight: 700; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; min-width: 72px; }
+    .stock-ok-t   { color: #52c46a; }
+    .stock-part-t { color: #f0a500; }
+    .stock-none-t { color: #e05050; }
     .rec-row    { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; padding: 3px 0; border-bottom: 1px solid #111128; }
     .rec-label  { min-width: 92px; font-size: .65rem; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #666688; }
     .rec-best .rec-label { color: #52c46a; }
@@ -356,6 +377,7 @@
 
   <div id="api-warnings"></div>
   <div id="credits-section"></div>
+  <div id="stock-section"></div>
   <div id="recommend-section"></div>
   <div id="quests-section"></div>
   <div id="exp-section"></div>

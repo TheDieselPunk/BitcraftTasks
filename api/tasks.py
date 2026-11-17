@@ -7,7 +7,8 @@ Returns all incomplete traveler tasks for a player, enriched with:
 - Crafting status per item (yes/partial/no/none)
 - Market price at the given claim (lowestSell from /api/market/item/{id})
 - Skill level requirement per task
-Plus per-traveler weekly task credits, the reroll cost, and the quests that unlock more task tiers.
+Plus per-traveler weekly task credits, the reroll cost, the quests that unlock more task tiers, and
+each traveler's task pool (every task they can hand the player, for the weekly stock estimate).
 Optional: username=Name (needed to check quest level requirements), region_id=R (the player's region;
 storage elsewhere is labelled with its region).
 """
@@ -23,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(__file__))
 import urllib.parse
+from recommend import pages, read_tasks, task_pool, unlocked_tiers
 from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, get_market_prices_for_claims, get_player_housing_items, get_skill_levels, merge_housing, cors_headers
 
 
@@ -188,6 +190,25 @@ def build_credits(tasks_data):
     return credits
 
 
+def build_pool(catalog_rows, catalog_first, held_raw, quests, my_quests, levels, inv_map, items_map, cargo_map):
+    """
+    Every task each traveler can give the player (the tiers they've unlocked), as
+    {traveler: [{id, reward, items: [{id, type, name, qty, have}]}]}.
+    """
+    catalog = read_tasks({**catalog_first, 'tasks': catalog_rows})
+    if not catalog:
+        return {}
+    held     = read_tasks(held_raw)
+    gated, unlocked = unlocked_tiers(quests, my_quests, items_map)
+    pool = {}
+    for t in task_pool(catalog, held, gated, unlocked, levels):
+        items = [{'id': iid, 'type': typ, 'qty': i['qty'], 'have': inv_map.get(iid, 0),
+                  'name': (cargo_map if typ == 'cargo' else items_map).get(iid) or i['name']}
+                 for i in t['items'] for iid, typ in [i['key']]]
+        pool.setdefault(t['traveler'], []).append({'id': t['id'], 'reward': t['reward'], 'items': items})
+    return pool
+
+
 def build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map):
     tasks = []
     for task in tasks_data.get('tasks', []):
@@ -227,6 +248,7 @@ def build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map):
         level    = task.get('levelRequirement') or {}
         skill_id = level.get('skill_id') or exp.get('skill_id')
         tasks.append({
+            'id':          task.get('taskId'),
             'traveler':    traveler,
             'traveler_id': traveler_id,
             'description': task.get('description', ''),
@@ -285,6 +307,7 @@ class handler(BaseHTTPRequestHandler):
                 'my_quests': 'player quests',
                 'levels':  'skill levels',
                 'regions': 'region names',
+                'catalog': 'task catalog',
             }
             with ThreadPoolExecutor(max_workers=10) as pool:
                 futures = {
@@ -296,6 +319,7 @@ class handler(BaseHTTPRequestHandler):
                     pool.submit(get_quest_catalog):                                   'quests',
                     pool.submit(api_get, f'/api/players/{player_id}/quests'):         'my_quests',
                     pool.submit(api_get, '/api/regions'):                             'regions',
+                    pool.submit(pages, '/api/traveler-tasks', 'tasks'):               'catalog',
                 }
                 if username:
                     futures[pool.submit(get_skill_levels, username, player_id)] = 'levels'
@@ -304,7 +328,7 @@ class handler(BaseHTTPRequestHandler):
                     try:
                         results[key] = f.result()
                     except Exception:
-                        results[key] = {} if key in ('tasks', 'inv', 'my_quests', 'levels') else []
+                        results[key] = {} if key in ('tasks', 'inv', 'my_quests', 'levels') else ([], {}) if key == 'catalog' else []
                         warnings.append(f'Could not load {_warn_names.get(key, key)} from BitJita')
 
             tasks_data   = results.get('tasks', {})
@@ -330,6 +354,9 @@ class handler(BaseHTTPRequestHandler):
                 'reroll_cost': tasks_data.get('rerollCreditCost'),
                 'quests':      build_quests(results.get('quests') or [], (results.get('my_quests') or {}).get('quests', []),
                                             results.get('levels') or {}, inv_map, inv_detail, items_map, cargo_map),
+                'pool':        build_pool(*results.get('catalog') or ([], {}), tasks_data, results.get('quests') or [],
+                                          (results.get('my_quests') or {}).get('quests', []), results.get('levels') or {},
+                                          inv_map, items_map, cargo_map),
                 'warnings':    warnings,
             }
 

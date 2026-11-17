@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.14.1';
+const APP_VERSION = '1.15.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -35,6 +35,7 @@ const S = {
   questPrices:   null,   // {item_id: {buy, cost, short, picks, craft?}}, or 'loading'
   questRegion:   '',
   questOffers:   null,   // {item_id: [offer]} from any region near the player, for the shopping route
+  pool:          {},     // {traveler: [{id, reward, items: [{id, type, name, qty, have}]}]}: tasks they can give
   recommend:     null,   // {claims, pool, ready, total, range} from /api/recommend, or {loading: true}
   tasksLoaded:   false,
   stallsLoaded:  false,
@@ -63,6 +64,7 @@ const resetCd       = $('reset-cd');
 const creditsSection = $('credits-section');
 const questsSection = $('quests-section');
 const recSection    = $('recommend-section');
+const stockSection  = $('stock-section');
 const expSection    = $('exp-section');
 const watchRow      = $('watch-row');
 const watchInput    = $('watch-input');
@@ -318,9 +320,11 @@ async function loadTasks() {
     const resets   = S.credits.map(c => c.next_reset).filter(Boolean);
     S.creditsReset = resets.length ? Math.min(...resets) : null;
     S.quests       = data.quests || [];
+    S.pool         = data.pool || {};
     S.tasksLoaded  = true;
     showWarnings(data.warnings);
     renderCredits();
+    renderStock();
     renderQuests();
     loadQuestPrices();
     startResetCountdown();
@@ -497,6 +501,145 @@ function renderCredits() {
       return `<span class="exp-chip"><span class="exp-skill">${esc(c.traveler)}</span><span class="${low ? 'credit-low' : 'exp-amt'}">${c.credits}${max}</span></span>`;
     }).join('') +
     (S.rerollCost != null ? `<span class="sub">Reroll costs ${S.rerollCost}</span>` : '');
+}
+
+// ── Weekly task stock ─────────────────────────────────────────────────────────
+// How much of each pool item the rest of the week's task credits will ask for, from the task rules:
+// a traveler shows 4 tasks; a finished task is replaced by a random pool task that isn't the one just
+// finished and shares no item with the other 3. Simulated many times from the tasks held now.
+const TASK_SLOTS       = 4;
+const CREDITS_PER_TASK = 1;     // credits a hand-in uses
+const STOCK_RUNS       = 400;   // simulated weeks per traveler
+
+// Small seeded RNG so the estimates don't jitter between renders
+function rng(seed) {
+  return () => {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Pool tasks that can replace `done`, given the tasks left on the board. When every one of them shares an
+// item with the board, the slot is assumed to still be filled, so the shared-item rule is dropped.
+function replacements(pool, board, done) {
+  const used = new Set(board.flatMap(t => t.items.map(i => i.id)));
+  const free = pool.filter(t => t !== done && !board.includes(t));
+  const best = free.filter(t => !t.items.some(i => used.has(i.id)));
+  return best.length ? best : free;
+}
+
+// One simulated week. pick(board) = the index of the task to hand in, or -1 to stop.
+// Returns {done: [task], choices: largest number of tasks a replacement was drawn from}
+function simulateWeek(pool, start, handins, rand, pick) {
+  const board = [...start];
+  while (board.length < TASK_SLOTS) {
+    const opts = replacements(pool, board, null);
+    if (!opts.length) break;
+    board.push(opts[Math.floor(rand() * opts.length)]);
+  }
+  const done = [];
+  let choices = 0;
+  for (let n = 0; n < handins && board.length; n++) {
+    const k = pick(board);
+    if (k < 0) break;
+    const [task] = board.splice(k, 1);
+    done.push(task);
+    const opts = replacements(pool, board, task);
+    choices = Math.max(choices, opts.length);
+    if (opts.length) board.push(opts[Math.floor(rand() * opts.length)]);
+  }
+  return { done, choices };
+}
+
+// Per traveler: expected demand per item if tasks are handed in in any order, and how many hand-ins
+// the player's own stock covers if they always hand in the task they hold the most of
+function stockEstimate(traveler, pool) {
+  const credit  = S.credits.find(c => c.traveler === traveler);
+  const handins = Math.floor((credit?.credits ?? credit?.weekly ?? 0) / CREDITS_PER_TASK);
+  const byId    = new Map(pool.map(t => [String(t.id), t]));
+  const start   = S.tasks.filter(t => t.traveler === traveler && byId.has(String(t.id))).map(t => byId.get(String(t.id)));
+  const items   = new Map();   // item id → {name, have, need, perTask: [qty]}
+  for (const t of pool) for (const i of t.items) {
+    const it = items.get(i.id) || { id: i.id, name: i.name, have: i.have, need: 0, tasks: 0 };
+    it.tasks++;
+    items.set(i.id, it);
+  }
+
+  const rand = rng(pool.length * 7919 + handins);
+  let choices = 0;
+  for (let r = 0; r < STOCK_RUNS; r++) {
+    const w = simulateWeek(pool, start, handins, rand, board => Math.floor(rand() * board.length));
+    choices = Math.max(choices, w.choices);
+    for (const t of w.done) for (const i of t.items) items.get(i.id).need += i.qty;
+  }
+  for (const it of items.values()) it.need = Math.ceil(it.need / STOCK_RUNS);
+
+  // Steering: hand in the held task the stock lasts longest for; stop when nothing held can be handed in
+  let covered = 0;
+  for (let r = 0; r < STOCK_RUNS; r++) {
+    const left = new Map([...items.values()].map(it => [it.id, it.have]));
+    const lasts = t => Math.min(...t.items.map(i => Math.floor(left.get(i.id) / i.qty)));
+    const w = simulateWeek(pool, start, handins, rand, board => {
+      let best = -1;
+      board.forEach((t, k) => { if (lasts(t) > 0 && (best < 0 || lasts(t) > lasts(board[best]))) best = k; });
+      if (best >= 0) for (const i of board[best].items) left.set(i.id, left.get(i.id) - i.qty);
+      return best;
+    });
+    covered += w.done.length;
+  }
+
+  return {
+    traveler, handins, pool: pool.length, choices, forced: choices <= 1,
+    covered: Math.round(covered / STOCK_RUNS),
+    items: [...items.values()].sort((a, b) => b.need - a.need || a.name.localeCompare(b.name)),
+  };
+}
+
+function stockBar(it, handins) {
+  const pct  = it.need ? Math.min(100, it.have / it.need * 100) : 100;
+  const cls  = it.have >= it.need ? 'ok' : it.have > 0 ? 'part' : 'none';
+  const tip  = `${it.name}\nYou have ${it.have.toLocaleString()}; your ${handins} remaining hand-ins are expected to ask for ` +
+               `${it.need.toLocaleString()}\n(in ${it.tasks} of the traveler's tasks, handed in in no particular order)`;
+  return `<div class="stock-row" data-tip="${esc(tip)}">` +
+    `<span class="stock-name">${esc(it.name)}</span>` +
+    `<span class="stock-bar"><span class="stock-fill stock-${cls}" style="width:${pct}%"></span></span>` +
+    `<span class="stock-num stock-${cls}-t">${it.have.toLocaleString()}<span class="sub"> / ${it.need.toLocaleString()}</span></span>` +
+  `</div>`;
+}
+
+function renderStock() {
+  const pools = Object.entries(S.pool || {});
+  if (!pools.length) { stockSection.innerHTML = ''; return; }
+  const help = 'Items the travelers can ask for this week: every task in the tiers you have unlocked.\n' +
+               `Bars show what you have over what your remaining task credits (${CREDITS_PER_TASK} per hand-in) are expected to ask for,\n` +
+               `from ${STOCK_RUNS} simulated weeks that start with the tasks you hold now. A finished task is replaced by a\n` +
+               'random task that isn\'t the one just handed in and uses none of the items on the other 3 tasks.\n' +
+               '"Your stock covers" assumes you always hand in the task you have the most of, so the new tasks\n' +
+               'keep coming from what you can do. In a pool of 5, the task that comes back is always the one\n' +
+               'not on the board, so you can alternate two tasks all week.';
+  stockSection.innerHTML =
+    `<div class="exp-label"><span data-tip="${esc(help)}" style="cursor:default;border-bottom:1px dotted #444466">Stock for this week's tasks</span></div>` +
+    `<div class="stock-grid">` +
+    pools.sort(([a], [b]) => a.localeCompare(b)).map(([trav, pool]) => {
+      const e = stockEstimate(trav, pool);
+      if (!e.handins) {
+        return `<div class="stock-card"><div class="stock-head"><span class="quest-trav">${esc(trav)}</span>` +
+               `<span class="sub">no credits left this week</span></div></div>`;
+      }
+      const cov  = e.covered >= e.handins ? 'inv-ok' : e.covered ? 'inv-part' : 'quest-short';
+      const mode = e.forced ? `<span class="stock-forced" data-tip="${esc(`Only ${e.pool} tasks: each hand-in brings back the task that isn't on the board,\nso you choose what comes next. Alternate two tasks you have items for:\n${Math.ceil(e.handins / 2)} hand-ins of each covers the week.`)}">steerable</span>`
+                            : `<span class="sub" data-tip="${esc(`Each new task is drawn from up to ${e.choices} that fit the rules`)}">random pick of ${e.choices}</span>`;
+      return `<div class="stock-card">` +
+        `<div class="stock-head"><span class="quest-trav">${esc(trav)}</span>` +
+        `<span class="sub">${e.handins} hand-ins left · ${e.pool} tasks</span>${mode}</div>` +
+        `<div class="stock-cover">Your stock covers <span class="${cov}">${Math.min(e.covered, e.handins)} of ${e.handins}</span></div>` +
+        e.items.map(it => stockBar(it, e.handins)).join('') +
+      `</div>`;
+    }).join('') +
+    `</div>`;
+  bindTips(stockSection);
 }
 
 // ── Claim recommendation ──────────────────────────────────────────────────────
