@@ -1,16 +1,17 @@
 """
-GET /api/tasks?player_id=X&claim_id=Y
+GET /api/tasks?player_id=X&region_id=R&x=X&z=Z
 
 Returns all incomplete traveler tasks for a player, enriched with:
 - Item names (from /api/items + /api/cargo catalogs)
 - Player inventory counts per item
 - Crafting status per item (yes/partial/no/none)
-- Market price at the given claim (lowestSell from /api/market/item/{id})
+- Market price in the player's region (every market in a region shares its listings), at the market
+  nearest the player (x, z)
 - Skill level requirement per task
 Plus per-traveler weekly task credits, the reroll cost, the quests that unlock more task tiers, and
 each traveler's task pool (every task they can hand the player, for the weekly stock estimate).
-Optional: username=Name (needed to check quest level requirements), region_id=R (the player's region;
-storage elsewhere is labelled with its region).
+Optional: username=Name (needed to check quest level requirements), region_id=R (the player's region,
+for market prices; storage elsewhere is labelled with its region).
 """
 
 import json
@@ -23,11 +24,11 @@ from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(__file__))
-import urllib.parse
 from recommend import pages, read_tasks, task_pool, unlocked_tiers
 CACHE_S = 60   # seconds Vercel's CDN may serve this response from cache
 
-from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_market_price, get_market_prices_for_claims, get_player_housing_items, get_skill_levels, merge_housing, cors_headers
+from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_player_housing_items, get_skill_levels, merge_housing, cors_headers, \
+    distance, market_item, nearest_markets
 
 
 TRAVELERS = {
@@ -268,6 +269,38 @@ def build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map):
     return tasks
 
 
+def nearest_order_claim(order_lists, px, pz):
+    """Fallback market when the relay can't list the region's markets: the nearest claim with an order."""
+    best = None
+    for orders in order_lists:
+        for o in orders:
+            x, z = o.get('claimLocationX'), o.get('claimLocationZ')
+            if x is None or z is None:
+                continue
+            d = distance(px, pz, float(x), float(z)) if px is not None else 0
+            if best is None or d < best['dist']:
+                best = {'id': str(o.get('claimEntityId', '')), 'name': o.get('claimName', ''), 'dist': d}
+    if best and px is None:
+        best['dist'] = None
+    return best
+
+
+def region_price(orders, qty, hub):
+    """[{claimId, claimName, price, available, distance}] for the region's cheapest order, sold at the hub
+    market, or [] if the region doesn't list qty units. distance is raw units from the player."""
+    prices = []
+    for o in orders:
+        try:
+            prices.append(int(o['priceThreshold']))
+        except (KeyError, TypeError, ValueError):
+            continue
+    available = sum(int(o.get('quantity') or 0) for o in orders)
+    if not prices or available < qty:
+        return []
+    return [{'claimId': (hub or {}).get('id', ''), 'claimName': (hub or {}).get('name', ''), 'price': min(prices),
+             'available': available, 'distance': (hub or {}).get('dist')}]
+
+
 class handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self._send(200, {})
@@ -275,23 +308,14 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         params    = parse_qs(urlparse(self.path).query)
         player_id = params.get('player_id', [''])[0].strip()
-        claim_id  = params.get('claim_id',  [''])[0].strip() or None
         username  = params.get('username',  [''])[0].strip()
         region_id = params.get('region_id', [''])[0].strip() or None
 
-        # market_claims: comma-separated "claimId:claimName" pairs (URL-encoded per pair)
-        # When provided, replaces single claim_id for market price lookups
-        market_claims_raw = params.get('market_claims', [''])[0]
-        market_claims = {}  # {claim_id: claim_name}
-        if market_claims_raw:
-            for encoded_part in market_claims_raw.split(','):
-                part = urllib.parse.unquote(encoded_part).strip()
-                if ':' in part:
-                    cid, cname = part.split(':', 1)
-                    market_claims[cid.strip()] = cname.strip()
-        # Fall back to single claim_id with empty name
-        if not market_claims and claim_id:
-            market_claims = {claim_id: ''}
+        try:   # the player's position, for the nearest market
+            px = float(params.get('x', [''])[0])
+            pz = float(params.get('z', [''])[0])
+        except ValueError:
+            px = pz = None
 
         if not player_id:
             self._send(400, {'error': 'player_id parameter is required'})
@@ -399,29 +423,27 @@ class handler(BaseHTTPRequestHandler):
                     k = f"{item['id']}|{item['type']}"
                     item['craft_info'] = seen.get(k, {'status': 'none', 'details': [], 'building': ''})
 
-            # Enrich market prices from selected claim(s)
-            if market_claims:
+            # Market prices: every market in a region shares the region's listings, so take the region's
+            # cheapest order and point at the market nearest the player
+            if region_id:
                 unique_items = {(item['id'], item['type']) for t in tasks for item in t['items']}
-                price_map = {}
                 with ThreadPoolExecutor(max_workers=10) as pool:
-                    futures = {
-                        pool.submit(get_market_prices_for_claims, iid, itype, market_claims): iid
-                        for iid, itype in unique_items
-                    }
+                    hub_f   = pool.submit(nearest_markets, px, pz, [region_id])
+                    futures = {pool.submit(market_item, itype, iid): iid for iid, itype in unique_items}
+                    orders  = {}
                     for f in as_completed(futures):
-                        iid = futures[f]
                         try:
-                            price_map[iid] = f.result()  # [{claimId, claimName, price}] sorted asc
+                            orders[futures[f]] = [o for o in f.result().get('sellOrders', [])
+                                                  if str(o.get('regionId')) == region_id]
                         except Exception:
-                            price_map[iid] = []
+                            orders[futures[f]] = []
+                            warnings.append(f'Could not load market orders for item {futures[f]}')
+                    hub = hub_f.result().get(region_id) or nearest_order_claim(orders.values(), px, pz)
                 for t in tasks:
                     for item in t['items']:
-                        prices = price_map.get(item['id'], [])
-                        # Filter by available qty; None means quantity not reported — treat as sufficient
-                        sufficient = [p for p in prices if p.get('available') is None or p.get('available', 0) >= item['qty']]
-                        item['market_prices'] = sufficient
+                        item['market_prices'] = region_price(orders.get(item['id'], []), item['qty'], hub)
                         # market_price = lowest for backward-compat cost calculation
-                        item['market_price'] = sufficient[0]['price'] if sufficient else None
+                        item['market_price'] = item['market_prices'][0]['price'] if item['market_prices'] else None
 
             self._send(200, {'tasks': tasks, **meta})
 

@@ -2,7 +2,8 @@
 GET /api/quest_prices?items=ID:TYPE:QTY,...&regionId=R&x=X&z=Z&username=Name&player_id=P
 
 Cheapest way to buy QTY of each quest item in the player's region, from claim markets and
-from stalls that sell for Hex Coin. Stall stock is checked against what the stall actually holds.
+from stalls that sell for Hex Coin. Every market in a region shares the region's listings, so market
+orders are bought at that region's market nearest the player. Stall stock is checked against what the stall actually holds.
 For items the region can't supply in full, how to craft the rest: the recipe, the ingredients the
 player still needs (player_id gives what they have) and where to buy those in the region.
 
@@ -31,7 +32,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 CACHE_S = 120   # seconds Vercel's CDN may serve this response from cache
 
 from _lib import api_get, distance, cors_headers, get_claims, build_inv_map, build_inv_detail_map, get_player_housing_items, \
-    get_skill_levels, market_item, merge_housing
+    get_skill_levels, market_item, merge_housing, nearest_markets
 
 INFINITE_STOCK = 2_000_000_000
 HEX_COIN_ID    = '1'
@@ -181,8 +182,9 @@ def craft_plan(key, units, detail, have, where, levels):
 class Sources:
     """Offers near the player for each (id, type) key: claim market orders and Hex Coin stall trades."""
 
-    def __init__(self, region_id, me, px, pz, stalls, claims):
+    def __init__(self, region_id, me, px, pz, stalls, claims, hubs):
         self.region_id, self.me, self.px, self.pz = region_id, me, px, pz
+        self.hubs        = hubs   # {region_id: the market nearest the player}
         self.stalls      = [s for s in stalls if self.keep(s.get('regionId'), s.get('locationX'), s.get('locationZ'))[0]]
         self.claim_at    = {(c['name'], round(c['x']), round(c['z'])): c['id'] for c in claims}
         self.claim_named = {c['name']: c['id'] for c in claims}
@@ -203,7 +205,11 @@ class Sources:
         self.by_key.setdefault(key, []).append({**source, 'dist': d, 'region': region, 'in_region': in_region})
 
     def add_market(self, key, orders):
+        # Every market in a region shares the region's listings, so buy at the region's market nearest the player
         for o in orders:
+            hub = self.hubs.get(str(o.get('regionId')))
+            if hub:
+                o = {**o, 'claimName': hub['name'], 'claimLocationX': hub['x'], 'claimLocationZ': hub['z']}
             ok, in_region, d = self.keep(o.get('regionId'), o.get('claimLocationX'), o.get('claimLocationZ'))
             if not ok or (o.get('ownerUsername') or '').lower() == self.me:
                 continue
@@ -291,6 +297,7 @@ class handler(BaseHTTPRequestHandler):
                 claims_f = pool.submit(get_claims, px, pz, None) if px is not None else None
                 have_f   = pool.submit(player_items, player_id, region_id) if player_id else None
                 levels_f = pool.submit(get_skill_levels, username, player_id) if player_id and username else None
+                hubs_f   = pool.submit(nearest_markets, px, pz)
 
                 try:
                     stalls, failed = stalls_f.result()
@@ -299,7 +306,8 @@ class handler(BaseHTTPRequestHandler):
                 except Exception:
                     stalls = []
                     warnings.append('Could not load stalls for quest prices')
-                src = Sources(region_id, username.lower(), px, pz, stalls, claims_f.result()[1] if claims_f else [])
+                src = Sources(region_id, username.lower(), px, pz, stalls, claims_f.result()[1] if claims_f else [],
+                              hubs_f.result())
                 add_markets(markets)
                 try:
                     have, where = have_f.result() if have_f else ({}, {})

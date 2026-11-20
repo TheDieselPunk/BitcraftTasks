@@ -255,6 +255,33 @@ def market_item(kind, item_id, claim_id=None):
     return {'sellOrders': orders, 'stats': {'totalAvailableSell': sum(o['quantity'] or 0 for o in orders)}}
 
 
+def nearest_markets(x, z, regions=None):
+    """
+    The market nearest to (x, z) in each region: {region_id_str: {id, name, x, z, dist}}, dist in raw units.
+    Every market in a region shares the region's listings, so the nearest one sells all of them.
+    A claim counts as a market when it holds a sell order, or is a ruined city (they all have one).
+    """
+    try:
+        found, _ = _relay.markets([int(r) for r in regions] if regions else None)
+    except Exception:
+        return {}
+    out = {}
+    for region, (orders, claims) in found.items():
+        selling = {o['claimEntityId'] for group in orders.values() for o in group}
+        best = None
+        for c in claims.values():
+            if c['x'] is None or not (c['id'] in selling or (c['neutral'] and '(N:' not in c['name'])):
+                continue
+            d = distance(x, z, c['x'], c['z']) if x is not None and z is not None else 0
+            if best is None or d < best[0]:
+                best = (d, c)
+        if best:
+            d, c = best
+            out[str(region)] = {'id': c['id'], 'name': c['name'], 'x': c['x'], 'z': c['z'],
+                                'dist': d if x is not None and z is not None else None}
+    return out
+
+
 def get_nearest_claim(x, z, region_id):
     """Convenience wrapper — returns just the nearest claim dict."""
     nearest, _ = get_claims(x, z, region_id)
@@ -469,81 +496,3 @@ def get_craft_info(item_id, item_type, needed_qty, inv_map, items_map, cargo_map
 
 def distance(x1, z1, x2, z2):
     return math.sqrt((x2 - x1) ** 2 + (z2 - z1) ** 2)
-
-
-def get_market_price(item_id, item_type, claim_id, needed_qty=1):
-    """
-    Fetch sell orders for an item at a specific claim.
-    Returns the lowest priceThreshold, or None if the claim doesn't have
-    enough quantity (totalAvailableSell < needed_qty) or no orders exist.
-    """
-    try:
-        d = market_item(item_type, item_id, claim_id)
-    except Exception:
-        return None
-
-    if d.get('stats', {}).get('totalAvailableSell', 0) < needed_qty:
-        return None
-
-    orders = d.get('sellOrders', [])
-    prices = []
-    for o in orders:
-        pt = o.get('priceThreshold')
-        if pt is None:
-            continue
-        try:
-            prices.append(int(pt))
-        except (ValueError, TypeError):
-            continue
-    return min(prices) if prices else None
-
-
-def get_market_prices_for_claims(item_id, item_type, claim_map):
-    """
-    Fetch all sell orders for an item and return per-claim prices and availability.
-    claim_map: {claim_id: claim_name}
-    Returns a list of {claimId, claimName, price, available} sorted ascending by price.
-    available is the sum of order quantities for that claim, or None if not reported.
-    """
-    try:
-        d = market_item(item_type, item_id)
-    except Exception:
-        return []
-
-    orders = d.get('sellOrders', [])
-    if not orders:
-        return []
-
-    best_price = {}
-    total_qty = {}
-    for o in orders:
-        cid = str(o.get('claimEntityId', ''))
-        if cid not in claim_map:
-            continue
-        pt = o.get('priceThreshold')
-        if pt is None:
-            continue
-        try:
-            price = int(pt)
-        except (ValueError, TypeError):
-            continue
-        if cid not in best_price or price < best_price[cid]:
-            best_price[cid] = price
-        qty = o.get('quantity')
-        if qty is not None:
-            try:
-                total_qty[cid] = total_qty.get(cid, 0) + int(qty)
-            except (ValueError, TypeError):
-                pass
-
-    result = [
-        {
-            'claimId':   cid,
-            'claimName': claim_map[cid],
-            'price':     price,
-            'available': total_qty.get(cid),  # None if order quantity not reported
-        }
-        for cid, price in best_price.items()
-    ]
-    result.sort(key=lambda x: x['price'])
-    return result

@@ -157,7 +157,7 @@ marketRange.addEventListener('input', () => {
   rangeVal.textContent = S.marketRangeH === 0 ? '0h' : `${S.marketRangeH}h`;
   localStorage.setItem('bcTasks_marketRange', S.marketRangeH);
   clearTimeout(_rangeDebounce);
-  _rangeDebounce = setTimeout(() => { if (S.player) { loadTasks(); loadRecommend(); } }, 600);
+  _rangeDebounce = setTimeout(() => { if (S.player) { render(); loadRecommend(); } }, 600);   // range picks Trader Stands; market prices are region-wide
 });
 
 // ── Tooltip ────────────────────────────────────────────────────────────────────
@@ -263,32 +263,12 @@ function standInRange(stall) {
   return Math.hypot(x - cx, z - cz) / 3 <= Math.max(S.marketRangeH, STAND_CLAIM_RADIUS_H);
 }
 
-function getClaimsInRange(rangeH) {
-  if (!S.selectedClaimId || !S.allClaims.length) return null;
-  const sel = S.allClaims.find(c => c.id === S.selectedClaimId);
-  if (!sel || sel.x == null || sel.z == null) return null;
-  return S.allClaims.filter(c => {
-    if (c.x == null || c.z == null) return false;
-    const dx = c.x - sel.x, dz = c.z - sel.z;
-    return Math.sqrt(dx * dx + dz * dz) / 3 <= rangeH;
-  });
-}
-
 async function loadTasks(fresh = false) {
   try {
     let url = `/api/tasks?player_id=${encodeURIComponent(S.player.id)}&username=${encodeURIComponent(S.player.username)}`;
-    if (S.player.regionId) url += `&region_id=${S.player.regionId}`;
-    if (S.marketRangeH > 0) {
-      const inRange = getClaimsInRange(S.marketRangeH);
-      if (inRange && inRange.length) {
-        const pairs = inRange.map(c => encodeURIComponent(c.id + ':' + c.name));
-        url += `&market_claims=${pairs.join(',')}`;
-      } else if (S.selectedClaimId) {
-        url += `&claim_id=${encodeURIComponent(S.selectedClaimId)}`;
-      }
-    } else if (S.selectedClaimId) {
-      url += `&claim_id=${encodeURIComponent(S.selectedClaimId)}`;
-    }
+    // Every market in a region shares its listings, so prices come from the region's market nearest the player
+    if (S.player.regionId)          url += `&region_id=${S.player.regionId}`;
+    if (S.player.locationX != null) url += `&x=${S.player.locationX}&z=${S.player.locationZ}`;
     const data = await apiFetch(url, fresh);
     S.tasks        = data.tasks || [];
     S.credits      = data.credits || [];
@@ -1215,13 +1195,11 @@ function itemSources(task, item) {
     });
   }
 
-  const markets = item.market_prices?.length ? item.market_prices
-    : item.market_price != null ? [{ price: item.market_price, claimName: S.allClaims.find(c => c.id === S.selectedClaimId)?.name || '' }] : [];
-  for (const mp of markets) {
-    const claim = mp.claimName ? ` <span class="stall-name">${esc(mp.claimName)}</span>` : '';
+  for (const mp of item.market_prices || []) {
+    const claim = mp.claimName ? ` <span class="stall-name" data-tip="Every market in the region sells the same listings; this is the nearest one">${esc(mp.claimName)}</span>` : '';
     out.push({
       order: mp.price,
-      html:  `${tag('market', 'Market')}${claim} · <span class="market-price">${HEX}${mp.price.toLocaleString()}/u</span> <span class="sub">(${HEX}${(mp.price * toBuy).toLocaleString()} for ${toBuy.toLocaleString()})</span>`,
+      html:  `${tag('market', 'Market')}${claim} · <span class="market-price">${HEX}${mp.price.toLocaleString()}/u</span> <span class="sub">(${HEX}${(mp.price * toBuy).toLocaleString()} for ${toBuy.toLocaleString()})</span> ${distHtml(mp.distance)}`,
     });
   }
 
