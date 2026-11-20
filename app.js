@@ -405,7 +405,7 @@ function buildStallMap() {
         isBarter:    true,
         qty:         itemData.qty,
         stock:       itemData.qty,
-        price_parts: [],
+        price_parts: itemData.price_parts || [],
       });
     }
   }
@@ -1190,7 +1190,8 @@ function itemSources(task, item) {
     }
     if (m.isBarter) {
       const claim = m.claimName ? ` <span class="sub">(${esc(m.claimName)})</span>` : '';
-      out.push({ order: 2e9, html: `${tag('barter', 'Barter')} <span class="stall-name">${esc(m.name)}</span>${claim} ${distHtml(m.distance)}` });
+      const bp = priceHtml(m.price_parts);
+      out.push({ order: 2e9, html: `${tag('barter', 'Barter')} <span class="stall-name">${esc(m.name)}</span>${bp ? ' · ' + bp : ''}${claim} ${distHtml(m.distance)}` });
       continue;
     }
     const coin   = hexPrice(m.price_parts);

@@ -133,6 +133,10 @@ class handler(BaseHTTPRequestHandler):
                 if failed_pages:
                     warnings.append(f'Stall data may be incomplete — {failed_pages} page(s) failed to load')
 
+            # Barter buildings are stalls too: their offers are the orders of the stall with the same entity id
+            offers_by_entity = {str(s.get('entityId')): {it['id']: it for it in parse_sell_items(s, 0)}
+                                for s in stalls_raw if s.get('entityId')}
+
             # Optionally pre-filter by region to reduce work
             if region_id:
                 stalls_raw = [s for s in stalls_raw if str(s.get('regionId', '')) == str(region_id)]
@@ -236,6 +240,8 @@ class handler(BaseHTTPRequestHandler):
                         if 'barter' not in bname.lower() and 'counter' not in bname.lower():
                             continue
                         nickname = bldg.get('buildingNickname') or bname
+                        # Only items the stall has a live offer for can be bought; the rest is just storage
+                        offered = offers_by_entity.get(str(bldg.get('entityId')), {})
                         stall_items = {}
                         for slot in bldg.get('inventory', []):
                             # API may wrap in 'contents' or expose fields directly
@@ -244,11 +250,18 @@ class handler(BaseHTTPRequestHandler):
                             qty     = c.get('quantity') or c.get('qty') or 0
                             itype   = c.get('type') or c.get('itemType') or c.get('item_type') or 'item'
                             iname   = c.get('itemName') or c.get('cargoName') or c.get('name') or ''
-                            if item_id and qty > 0:
+                            if item_id and qty > 0 and item_id in offered:
                                 lut = cargos_lut if itype == 'cargo' else items_lut
                                 if item_id not in stall_items:
-                                    stall_items[item_id] = {'name': iname or lut.get(item_id, ''), 'qty': 0, 'type': itype}
+                                    stall_items[item_id] = {'name': iname or lut.get(item_id, ''), 'qty': 0, 'type': itype,
+                                                            'price_parts': offered[item_id]['price_parts']}
                                 stall_items[item_id]['qty'] += qty
+
+                        # Never more than the offer itself has left to trade
+                        for item_id, it in stall_items.items():
+                            o = offered[item_id]
+                            if o['stock'] is not None:
+                                it['qty'] = min(it['qty'], o['stock'] * o['qty'])
 
                         if stall_items:
                             # Distance to selected claim (raw units; frontend divides by 3)
