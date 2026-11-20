@@ -26,6 +26,7 @@ const S = {
   sortCol:       'profit',
   sortAsc:       false,
   filterOn:      false,
+  travelerFilter: null,  // traveler name picked in Task credits: show only their tasks
   credits:       [],
   rerollCost:    null,
   creditsReset:  null,
@@ -464,10 +465,20 @@ function renderCredits() {
     S.credits.map(c => {
       const low = S.rerollCost != null && c.credits < S.rerollCost;
       const max = c.weekly != null ? `<span class="credit-max">/${c.weekly}</span>` : '';
-      return `<span class="exp-chip"><span class="exp-skill">${esc(c.traveler)}</span><span class="${low ? 'credit-low' : 'exp-amt'}">${c.credits}${max}</span></span>`;
+      const on  = S.travelerFilter === c.traveler;
+      return `<button type="button" class="exp-chip credit-chip${on ? ' active' : ''}" data-traveler="${esc(c.traveler)}" title="${on ? 'Show all travelers' : `Show only ${esc(c.traveler)}'s tasks`}"><span class="exp-skill">${esc(c.traveler)}</span><span class="${low ? 'credit-low' : 'exp-amt'}">${c.credits}${max}</span></button>`;
     }).join('') +
     (S.rerollCost != null ? `<span class="sub">Reroll costs ${S.rerollCost}</span>` : '');
 }
+
+creditsSection.addEventListener('click', e => {
+  const chip = e.target.closest('.credit-chip');
+  if (!chip) return;
+  const name = chip.dataset.traveler;
+  S.travelerFilter = S.travelerFilter === name ? null : name;
+  renderCredits();
+  render();
+});
 
 // ── Weekly task stock ─────────────────────────────────────────────────────────
 // How much of each pool item the rest of the week's task credits will ask for, from the task rules:
@@ -1034,7 +1045,8 @@ function render() {
   if (!S.tasksLoaded) return;
 
   const stallMap = buildStallMap();
-  let tasks = [...S.tasks].map(t => decorateTask(t, stallMap));
+  let tasks = [...S.tasks].filter(t => !S.travelerFilter || t.traveler === S.travelerFilter)
+                          .map(t => decorateTask(t, stallMap));
 
   tasks.sort((a, b) => {
     const sa = STATUS_RANK[taskStatus(a)], sb = STATUS_RANK[taskStatus(b)];
@@ -1052,7 +1064,9 @@ function render() {
   if (S.filterOn) tasks = tasks.filter(isCompletable);
 
   if (!tasks.length) {
-    emptyMsg.textContent = S.filterOn ? 'No completable tasks found.' : (S.tasks.length ? '' : 'No incomplete tasks found.');
+    const who = S.travelerFilter ? ` for ${S.travelerFilter}` : '';
+    emptyMsg.textContent = S.filterOn ? `No completable tasks found${who}.`
+      : (S.travelerFilter ? `No incomplete tasks found${who}.` : (S.tasks.length ? '' : 'No incomplete tasks found.'));
     mainTbl.style.display = 'none';
     return;
   }
