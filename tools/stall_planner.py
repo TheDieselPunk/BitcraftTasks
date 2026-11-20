@@ -7,8 +7,13 @@ Local tool, not deployed. Run from the repo root:
     python tools/stall_planner.py --margin 0.2 --active-days 3 --html
 
 How it decides:
-  - Demand: the traveler tasks your claim's members hold right now (members who signed in within
-    --active-days), less what each member already has in their inventories and banks.
+  - Demand: a week of your claim's members' traveler tasks (members who signed in within --active-days),
+    estimated as the main app does: each member's task pool is every task in the tiers they've unlocked,
+    and a simulated week hands in tasks as the board refills (4 tasks; a replacement shares no item with
+    the other 3). Hand-ins a week are measured from task credits: members whose counter still shows last
+    week used 50 minus what's left; everyone else gets the median of those, per traveler. Demand is gross,
+    as what members hold covers a week at most. With --now: the tasks they hold right now, less what
+    they already have in their inventories and banks.
   - Supply: what other players sell at the market claims (--markets) right now: market sell orders and
     Hex Coin stall trades at those claims, stall stock checked against what the stall holds.
   - An item is worth selling only where demand exceeds that supply (the shortfall).
@@ -24,7 +29,8 @@ How it decides:
     region's market sell orders, or BitJita's global median when the region has none). For an item nobody
     sells, the floor is what its ingredients are worth instead ("Parts/u": the cheapest recipe, each
     ingredient at the lower of its going price and its own ingredients' worth). Tasks wanting the
-    same quantity share a trade, priced where it brings in the most; "×N" is how many to stock.
+    same quantity share a trade, priced where it brings in the most; "×N" is how many trades a week to
+    expect (with --now, how many to stock now).
 
 Recipes and item details are cached in tools/.cache for a week (they hardly change); markets, stalls,
 tasks and inventories are always read fresh.
@@ -35,6 +41,7 @@ import html
 import json
 import math
 import os
+import random
 import statistics
 import sys
 import time
@@ -46,8 +53,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, '..', 'api'))
 
 import _relay                                                      # noqa: E402
-from _lib import RateLimited, api_get, build_inv_map               # noqa: E402
-from recommend import read_tasks                                   # noqa: E402
+from _lib import RateLimited, api_get, build_inv_map, get_skill_levels  # noqa: E402
+from recommend import TRAVELERS, pages, read_tasks, task_pool, unlocked_tiers  # noqa: E402
 from quest_prices import get_all_stalls, stall_offers, stall_stock  # noqa: E402
 
 CACHE_DIR   = os.path.join(HERE, '.cache')
@@ -324,6 +331,143 @@ def member_needs(member, names):
     return out
 
 
+# ── Demand: a week of members' tasks ──────────────────────────────────────────
+# The app's weekly stock estimate (app.js, "Weekly task stock"), per member: a traveler shows 4 tasks; a
+# finished task is replaced by a random pool task that isn't the one just finished and shares no item with
+# the other 3. Simulated many times to get how often each pool task is handed in a week.
+
+TASK_SLOTS   = 4
+WEEK_RUNS    = 150
+TIERS_TTL_S  = 24 * 3600   # a member's quests and skill levels, which decide their task pool
+REUSED_RESET = 24 * 3600   # a counter last reset this long before the latest reset still shows last week
+
+
+def member_week(member):
+    """A member's held tasks, credits and unlocked tiers: {member, held, credits: {traveler: (left, last_reset)},
+    levels, quests}, or None if their tasks can't be read."""
+    pid  = member['playerEntityId']
+    raw  = soft(f'/api/players/{pid}/traveler-tasks')
+    if not raw:
+        return None
+
+    def tiers():
+        try:
+            levels = get_skill_levels(member['userName'], pid)
+        except Exception:
+            levels = {}
+        return {'levels': levels, 'quests': (soft(f'/api/players/{pid}/quests') or {}).get('quests', [])}
+    t = cached(f'tiers-{pid}', tiers, TIERS_TTL_S)
+    credits = {}
+    for tid, c in (raw.get('taskCredits') or {}).items():
+        name = TRAVELERS.get(int(tid)) if str(tid).isdigit() else None
+        if name:
+            credits[name] = (c.get('credits', 0), c.get('lastReset') or 0)
+    return {'member': member['userName'], 'held': read_tasks(raw), 'credits': credits, **t,
+            'weekly': max((w.get('weekly_task_credits') or 0 for w in raw.get('weeklyCredits') or []), default=50) or 50}
+
+
+def weekly_handins(weeks):
+    """
+    {member: {traveler: hand-ins a week}}, measured: a member whose counter wasn't reset in the latest weekly
+    reset still shows last week, so they used `weekly - left`. Everyone else gets the median of those, per
+    traveler. Returns (handins, {traveler: (median, how many members it's measured from)}).
+    """
+    latest = max((last for w in weeks for _, last in w['credits'].values()), default=0)
+    seen   = {}
+    for w in weeks:
+        for trav, (left, last) in w['credits'].items():
+            if last and last < latest - REUSED_RESET:
+                seen.setdefault(trav, []).append(max(0, w['weekly'] - left))
+    medians = {trav: (statistics.median(v), len(v)) for trav, v in seen.items()}
+    out = {}
+    for w in weeks:
+        per = {}
+        for trav, (left, last) in w['credits'].items():
+            if last and last < latest - REUSED_RESET:
+                per[trav] = max(0, w['weekly'] - left)
+            else:
+                per[trav] = medians.get(trav, (0, 0))[0]
+        out[w['member']] = per
+    return out, medians
+
+
+class WeekSim:
+    """How often each pool task is handed in, for the first k hand-ins of a week, from simulated weeks.
+    Cached per pool, as members in the same tiers share one."""
+
+    def __init__(self):
+        self.cache = {}
+
+    def counts(self, pool, handins):
+        """{task id: expected hand-ins} for `handins` hand-ins a week from this pool (a list of read_tasks tasks)."""
+        handins = int(round(handins))
+        if handins <= 0 or not pool:
+            return {}
+        key = tuple(sorted(str(t['id']) for t in pool))
+        if key not in self.cache:
+            self.cache[key] = self._simulate(pool)
+        runs = self.cache[key]
+        out  = {}
+        for seq in runs:
+            for tid in seq[:handins]:
+                out[tid] = out.get(tid, 0) + 1
+        return {tid: n / len(runs) for tid, n in out.items()}
+
+    @staticmethod
+    def _simulate(pool, max_handins=60):
+        rand  = random.Random(len(pool) * 7919)
+        items = {id(t): frozenset(i['key'] for i in t['items']) for t in pool}
+
+        def replacements(board, done):
+            used = frozenset().union(*(items[id(t)] for t in board)) if board else frozenset()
+            free = [t for t in pool if t is not done and t not in board]
+            best = [t for t in free if not (items[id(t)] & used)]
+            return best or free
+
+        runs = []
+        for _ in range(WEEK_RUNS):
+            board = []
+            while len(board) < TASK_SLOTS:
+                opts = replacements(board, None)
+                if not opts:
+                    break
+                board.append(rand.choice(opts))
+            seq = []
+            for _ in range(max_handins):
+                if not board:
+                    break
+                task = board.pop(rand.randrange(len(board)))
+                seq.append(str(task['id']))
+                opts = replacements(board, task)
+                if opts:
+                    board.append(rand.choice(opts))
+            runs.append(seq)
+        return runs
+
+
+def weekly_tasks(weeks, catalog_tasks, quests, item_names):
+    """A week of each member's tasks as [{member, traveler, reward, qty, lacks, weight}], weight = expected
+    hand-ins a week. lacks is the whole task: what members hold covers a week at most, so demand is gross."""
+    handins, medians = weekly_handins(weeks)
+    sim, out = WeekSim(), []
+    for w in weeks:
+        gated, unlocked = unlocked_tiers(quests, w['quests'], item_names)
+        pool = task_pool(catalog_tasks, w['held'], gated, unlocked, w['levels'])
+        by_trav = {}
+        for t in pool:
+            by_trav.setdefault(t['traveler'], []).append(t)
+        for trav, tasks in by_trav.items():
+            byid = {str(t['id']): t for t in tasks}
+            for tid, weight in sim.counts(tasks, handins[w['member']].get(trav, 0)).items():
+                t   = byid[tid]
+                qty = {}
+                for i in t['items']:
+                    qty[i['key']] = qty.get(i['key'], 0) + i['qty']
+                out.append({'member': w['member'], 'traveler': trav, 'reward': t['reward'], 'qty': qty,
+                            'lacks': dict(qty), 'weight': weight})
+    return out, handins, medians
+
+
 # ── Supply and prices ─────────────────────────────────────────────────────────
 
 def weighted_median(orders):
@@ -413,29 +557,29 @@ def price_item(key, tasks, going, profit, margin, shortfall):
     task's ceiling reaches the floor.
     """
     unit_going = going.get(key) or 0
-    by_bundle  = {}   # bundle size -> [(ceiling, member)]
+    by_bundle  = {}   # bundle size -> [(ceiling, member, expected hand-ins)]
     for t in tasks:
         bundle = t['qty'][key]
         other  = sum(math.ceil(n * (going.get(k) or 0)) for k, n in t['lacks'].items() if k != key)
         ceil_  = t['reward'] - buyer_cut(t['reward'], profit, margin) - other
-        by_bundle.setdefault(bundle, []).append((ceil_, t['member']))
+        by_bundle.setdefault(bundle, []).append((ceil_, t['member'], t.get('weight', 1)))
     trades, top = [], (None, None)
     left = shortfall
     # Biggest bundles first: one trade covers a whole task
     for bundle, asks in sorted(by_bundle.items(), key=lambda b: -b[0]):
         floor = max(1, math.ceil(bundle * unit_going))
-        for c, _ in asks:
+        for c, _, _ in asks:
             if top[0] is None or c / bundle > top[0] / top[1]:
                 top = (c, bundle)
         best = None
-        for ceiling, _ in asks:
+        for ceiling, _, _ in asks:
             if ceiling < floor:
                 continue
             price = round_price(ceiling, floor)
-            n = min(sum(1 for c, _ in asks if c >= price), math.ceil(left / bundle))
+            n = min(math.floor(sum(w for c, _, w in asks if c >= price) + 0.5), math.ceil(left / bundle))
             if n > 0 and (not best or n * price > best['revenue']):
                 best = {'bundle': bundle, 'price': price, 'trades': n, 'revenue': n * price,
-                        'buyers': sorted({m for c, m in asks if c >= price})}
+                        'buyers': sorted({m for c, m, _ in asks if c >= price})}
         if best and left > 0:
             trades.append(best)
             left -= best['trades'] * bundle
@@ -552,6 +696,8 @@ def main():
     ap.add_argument('--margin', type=float, default=0.08,
                     help="share of a task's reward the buyer keeps, when that's more than --profit (default 0.08)")
     ap.add_argument('--active-days', type=float, default=7, help='only members signed in within this many days (default 7)')
+    ap.add_argument('--now', action='store_true',
+                    help="price for the tasks members hold right now instead of an estimated week of tasks")
     ap.add_argument('--min-steps', type=int, default=0, help='leave out items easier than this many crafting steps')
     ap.add_argument('--effort-dir', default=EFFORT_DIR,
                     help='your Bitcraft Effort project, whose chain calculator times each item (default: next to this repo)')
@@ -589,21 +735,46 @@ def main():
     since   = datetime.now(timezone.utc) - timedelta(days=args.active_days)
     active  = [m for m in members if m['playerEntityId'] != me_id
                and (parse_ts(m.get('lastLoginTimestamp')) or datetime.min.replace(tzinfo=timezone.utc)) >= since]
-    log(f"Reading tasks and inventories of {len(active)} of {len(members)} {claim['name']} members "
-        f"(signed in within {args.active_days:g} days)...")
     names = catalog()
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(lambda m: member_needs(m, names), active))
-    failed = sum(1 for r in results if r is None)
+    if args.now:
+        log(f"Reading tasks and inventories of {len(active)} of {len(members)} {claim['name']} members "
+            f"(signed in within {args.active_days:g} days)...")
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda m: member_needs(m, names), active))
+        failed = sum(1 for r in results if r is None)
+        tasks  = [t for r in results if r for t in r]
+        basis  = f'{len(tasks)} open tasks'
+    else:
+        log(f"Reading tasks, credits and unlocked tiers of {len(active)} of {len(members)} {claim['name']} members "
+            f"(signed in within {args.active_days:g} days; tiers are cached for a day)...")
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            cat_f   = pool.submit(pages, '/api/traveler-tasks', 'tasks')
+            quest_f = pool.submit(pages, '/api/quests', 'quests')
+            weeks   = list(ThreadPoolExecutor(max_workers=8).map(member_week, active))
+            rows_, first = cat_f.result()
+            quests, _    = quest_f.result()
+        failed = sum(1 for w in weeks if w is None)
+        for w in weeks:
+            for t in (w or {}).get('held', []):
+                for i in t['items']:
+                    names.setdefault(i['key'], {'name': i['name'], 'tier': None})
+        log('Simulating a week of tasks per member...')
+        item_names = {k[0]: v['name'] for k, v in names.items() if k[1] == 'item'}
+        tasks, handins, medians = weekly_tasks([w for w in weeks if w], read_tasks({**first, 'tasks': rows_}),
+                                               quests, item_names)
+        per_week = sum(sum(v.values()) for v in handins.values())
+        log('  hand-ins a week, median of members whose counter shows last week: ' +
+            ', '.join(f'{t} {m:g} ({n} measured)' for t, (m, n) in sorted(medians.items())))
+        basis = f'about {per_week:,.0f} task hand-ins a week'
     if failed:
         log(f'  warning: could not read {failed} member(s)')
-    tasks = [t for r in results if r for t in r]
-    need  = {}
+    need = {}
     for t in tasks:
         for k, n in t['lacks'].items():
-            need[k] = need.get(k, 0) + n
+            need[k] = need.get(k, 0) + n * t.get('weight', 1)
+    need = {k: math.ceil(n) for k, n in need.items() if n >= 0.5}
     need.pop((HEX_COIN, 'item'), None)
-    log(f'  {len(tasks)} tasks need {len(need)} different items')
+    log(f'  {basis} need {len(need)} different items')
 
     # Supply
     log(f"Reading markets and stalls at {', '.join(market_names)}...")
@@ -662,7 +833,8 @@ def main():
     rows.sort(key=lambda r: (r['rate'] is None, -(r['rate'] or 0), -r['revenue']))
     skipped.sort(key=lambda r: -r['shortfall'])
 
-    meta = (f"{len(active)} active {claim['name']} members, {len(tasks)} open tasks · supply at "
+    meta = (f"{len(active)} active {claim['name']} members, {basis} · "
+            f"{'stock for the tasks held now' if args.now else 'trades and coins are per week'} · supply at "
             f"{' + '.join(market_names)} · buyer keeps {args.profit} coins or {args.margin:.0%} of the reward · "
             f"timed at your toolbelt's powers · "
             f"{datetime.now().strftime('%Y-%m-%d %H:%M')}")
