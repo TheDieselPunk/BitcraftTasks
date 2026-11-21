@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.22.0';
+const APP_VERSION = '1.23.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -1111,6 +1111,63 @@ function aqRecipeHtml(c) {
     `<span class="sub">at ${esc(c.building || 'a crafting station')}</span> ${levels}</div>${rows}</div>`;
 }
 
+// Everything one quest has you buy or trade for, by place: the quest's own items and the ingredients of
+// crafts it can go ahead with. [{place, dist, cost, unsure, items: [{name, units, cost, from}]}], nearest first.
+function questShopping(q) {
+  const at  = new Map();
+  const add = (place, dist, name, units, cost, from, unsure) => {
+    if (!at.has(place)) at.set(place, { place, dist, cost: 0, unsure: false, items: new Map() });
+    const p = at.get(place);
+    if (p.dist == null || (dist != null && dist < p.dist)) p.dist = dist;
+    p.unsure ||= unsure;
+    p.cost += cost || 0;
+    const it = p.items.get(name) || { name, units: 0, cost: 0, trade: false, from: new Set() };
+    it.units += units;
+    it.cost  += cost || 0;
+    it.trade ||= cost == null;
+    it.from.add(from);
+    p.items.set(name, it);
+  };
+  const crafted = c => {
+    for (const i of c.ings) {
+      for (const pk of i.bought.picks) add(pk.claim, pk.dist, i.name, pk.units, pk.cost, sellerLine(pk), !!pk.stand);
+      if (i.craft?.ok) crafted(i.craft);
+    }
+  };
+  q.needs.forEach((n, k) => {
+    const p = q._plans[k];
+    for (const b of p.buys) {
+      add(b.label, b.dist, n.name, b.units, b.cost, `${b.kind}${b.seller && b.seller !== b.label ? `: ${b.seller}` : ''}`,
+          b.kind === 'stand' && !b.live);
+    }
+    for (const t of p.trades) {
+      const price = t.price_parts.map(pp => `${Math.round(pp.qty).toLocaleString()} ${pp.name}`).join(' + ');
+      add(t.label, t.dist, n.name, t.units, null, `trade: ${t.seller}${price ? ` (${price} each)` : ''}`, false);
+    }
+    if (p.craft?.ok) crafted(p.craft);
+  });
+  return [...at.values()].map(p => ({ ...p, items: [...p.items.values()] }))
+    .sort((a, b) => (a.dist ?? Infinity) - (b.dist ?? Infinity) || a.place.localeCompare(b.place));
+}
+
+function aqShoppingHtml(q) {
+  const places = questShopping(q);
+  if (!places.length) return '';
+  const total = places.reduce((s, p) => s + p.cost, 0);
+  return `<div class="aq-shop"><div class="aq-shop-head">Shopping list` +
+    `${total ? ` <span class="quest-cost">${HEX}${total.toLocaleString()}</span>` : ''}` +
+    `${q._verdict === 'short' ? ` <span class="sub">(what's for sale; the quest still needs more)</span>` : ''}</div>` +
+    places.map(p =>
+      `<div class="aq-shop-row"><span class="aq-shop-place">${esc(p.place)}${p.unsure ? STAND_MARK : ''}` +
+      `${p.dist != null ? ` <span class="sub">${p.dist.toLocaleString()}h</span>` : ''}</span>` +
+      `<span class="aq-shop-cost">${p.cost ? `${HEX}${p.cost.toLocaleString()}` : ''}</span>` +
+      `<span class="aq-shop-items">` + p.items.map(it =>
+        `<span class="aq-shop-item" data-tip="${esc([...it.from].join('\n'))}">${it.units.toLocaleString()}× ${esc(it.name)}` +
+        `${it.cost ? ` <span class="sub">${HEX}${it.cost.toLocaleString()}</span>` : it.trade ? ' <span class="sub">trade</span>' : ''}</span>`
+      ).join('') + `</span></div>`
+    ).join('') + `</div>`;
+}
+
 function renderActiveQuests(stallMap = buildStallMap()) {
   if (!S.tasksLoaded || !S.activeQuests.length) {
     aqSection.innerHTML = S.tasksLoaded ? '<div class="exp-label">No active quests found.</div>' : '';
@@ -1159,6 +1216,7 @@ function renderActiveQuests(stallMap = buildStallMap()) {
         `<div class="aq-verdict">${AQ_VERDICT[q._verdict]}${cost}${extra}</div>` +
         needs +
         (q.rewards?.length ? `<div class="aq-rewards">Rewards: ${q.rewards.map(r => `<b>${esc(r)}</b>`).join(', ')}</div>` : '') +
+        aqShoppingHtml(q) +
       `</div>`;
     }).join('') + `</div>`;
   bindTips(aqSection);
