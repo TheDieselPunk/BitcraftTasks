@@ -1,8 +1,9 @@
 """
 GET /api/quest_prices?items=ID:TYPE:QTY,...&regionId=R&x=X&z=Z&username=Name&player_id=P
 
-Cheapest way to buy QTY of each quest item in the player's region, from claim markets and
-from stalls that sell for Hex Coin. Every market in a region shares the region's listings, so market
+Cheapest way to buy QTY of each quest item in the player's region, from claim markets, from
+stalls that sell for Hex Coin and from travelers' Hex Coin trades (Rumbagh's sandpaper: travelers are
+everywhere, so these have no place; trades the player hasn't unlocked are left out). Every market in a region shares the region's listings, so market
 orders are bought at that region's market nearest the player. Stall stock is checked against what the stall actually holds.
 For items the region can't supply in full, how to craft the rest: the recipe, the ingredients the
 player still needs (player_id gives what they have) and where to buy those in the region.
@@ -10,7 +11,8 @@ player still needs (player_id gives what they have) and where to buy those in th
 Returns:
   - items: {id: {buy, cost, short, picks: [{units, cost, unit, claim, source, seller, stand, dist}], craft?}}
     short = units that can't be bought in the region; dist is in display units (raw / 3)
-    seller = the market order's owner, or the stall to look for, like "sfmason's Sturdy Barter Stall (Rumbagh T1 5)"
+    source = 'market' | 'stall' | 'traveler'
+    seller = the market order's owner, the traveler, or the stall to look for, like "sfmason's Sturdy Barter Stall (Rumbagh T1 5)"
     stand = sold from a Trader Stand, which can be moved or packed away, so it may not be at the claim
     craft = {recipe, building, crafts, makes, per_craft, levels: [{skill, level, have}],
              ingredients: [{id, type, name, per, qty, have, where, buy, cost, short, picks}]}
@@ -20,6 +22,7 @@ Returns:
   - offers: {id: [{claim, region, x, z, price, bundle, units, source, seller, stand}]}: for the items and the
     crafting ingredients priced, every offer within
     ROUTE_RADIUS of the player in any region, for planning a shopping route (price is per bundle)
+  - travelers: {id: [{traveler, price, bundle}]}: travelers' Hex Coin trades for the items and ingredients priced
   - region: region name
 """
 
@@ -32,6 +35,7 @@ from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(__file__))
+import _travelers
 CACHE_S = 120   # seconds Vercel's CDN may serve this response from cache
 
 from _lib import api_get, distance, cors_headers, get_claims, build_inv_map, build_inv_detail_map, get_player_housing_items, \
@@ -313,6 +317,14 @@ class Sources:
                      seller=stall_label(st, claim_inv), stand=bool(st.get('nickname')),   # only Trader Stands have one
                      x=st.get('locationX'), z=st.get('locationZ'))
 
+    def add_travelers(self, keys, trades):
+        """Travelers' Hex Coin trades for these keys. Travelers are everywhere, so these have no place or
+        distance: any copy of the traveler sells them. trades = _travelers.coin_trades()."""
+        for key in keys:
+            for t in trades.get(key, []):
+                self.add(key, True, None, '', bundle=t['bundle'], price=t['price'], units=t['units'],
+                         claim=f"any {t['traveler']}", source='traveler', seller=t['traveler'], stand=False, x=None, z=None)
+
     def in_region(self, key, units):
         return cheapest(units, [s for s in self.by_key.get(key, []) if s['in_region']])
 
@@ -362,6 +374,7 @@ class handler(BaseHTTPRequestHandler):
                 have_f   = pool.submit(player_items, player_id, region_id) if player_id else None
                 levels_f = pool.submit(get_skill_levels, username, player_id) if player_id and username else None
                 hubs_f   = pool.submit(nearest_markets, px, pz)
+                know_f   = pool.submit(_travelers.player_knowledge, player_id, region_id) if player_id else None
 
                 try:
                     stalls, failed = stalls_f.result()
@@ -382,8 +395,15 @@ class handler(BaseHTTPRequestHandler):
                     levels = levels_f.result() if levels_f else {}
                 except Exception:
                     levels = {}
+                try:
+                    knowledge = know_f.result() if know_f else None
+                    trades    = _travelers.coin_trades(knowledge, levels, region_id or None)
+                except Exception:
+                    trades = {}
+                    warnings.append('Could not load traveler trades for quest prices')
 
             src.add_stalls(need)
+            src.add_travelers(need, trades)
             items = {k[0]: src.in_region(k, n) for k, n in need.items()}
 
             # Crafting what the region can't supply: recipes, then where to buy the missing ingredients. An
@@ -410,6 +430,7 @@ class handler(BaseHTTPRequestHandler):
                     with ThreadPoolExecutor(max_workers=10) as pool:
                         add_markets(market(pool, extra))
                     src.add_stalls(extra)
+                    src.add_travelers(extra, trades)
                     priced |= extra
                 pending = []
                 for p, above in plans:
@@ -424,6 +445,8 @@ class handler(BaseHTTPRequestHandler):
                 'items':    items,
                 'offers':   {k[0]: [{f: s[f] for f in route_fields} for s in src.by_key.get(k, [])
                                     if s['dist'] is not None and s['dist'] <= ROUTE_RADIUS] for k in priced},
+                'travelers': {k[0]: [{'traveler': t['traveler'], 'price': t['price'], 'bundle': t['bundle']}
+                                     for t in trades.get(k, [])] for k in priced if trades.get(k)},
                 'region':   src.region,
                 'warnings': warnings,
             })

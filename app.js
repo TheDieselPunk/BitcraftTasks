@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.26.0';
+const APP_VERSION = '1.27.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -370,6 +370,7 @@ async function loadQuestPrices(fresh = false) {
     S.questPrices = data.items || {};
     S.questRegion = data.region || '';
     S.questOffers = data.offers || null;
+    S.questTravelers = data.travelers || {};
     showWarnings(data.warnings);
   } catch (err) {
     if (S.quests !== quests) return;
@@ -912,10 +913,11 @@ const AQ_VERDICT = {
   barter:  'Can finish with barter trades',
   craft:   'Can finish by crafting',
   short:   'Missing items',
+  level:   'Needs a higher skill level',
   game:    'Do this step in game',
   stale:   'Stage moved on in game — updating…',
 };
-const AQ_RANK = { ready: 0, housing: 1, pending: 2, buy: 3, barter: 4, craft: 5, short: 6, game: 7, stale: 8 };
+const AQ_RANK = { ready: 0, housing: 1, pending: 2, buy: 3, barter: 4, craft: 5, short: 6, level: 6, game: 7, stale: 8 };
 const AQ_DONE = new Set(['ready', 'housing', 'pending', 'buy', 'barter', 'craft']);
 const AQ_FILTERS = [
   ['all',   'All',           () => true],
@@ -995,8 +997,9 @@ function questNeedPlan(n, stallMap) {
   left = takeHousing(n.id, left, plan.housing, stallMap, held);
   const entries = stallMap[n.id] || [];
   if (left > 0 && n.id !== HEX_COIN_ID) {
-    // Coin offers: the region's market (from the quest price lookup) and the stalls in market range
-    const cands = [];
+    // Coin offers: the region's market (from the quest price lookup), travelers' coin trades (any copy of
+    // the traveler, and they're everywhere) and the stalls in market range
+    const cands = travelerOffers(n.id).map(t => ({ ...t, kind: 'traveler', label: t.claim }));
     const pr = S.questPrices && S.questPrices !== 'loading' ? S.questPrices[n.id] : null;
     if (S.questOffers) {
       for (const o of S.questOffers[n.id] || []) {
@@ -1044,6 +1047,12 @@ function questNeedPlan(n, stallMap) {
   return plan;
 }
 
+// Travelers' Hex Coin trades for an item, as offers: no place or distance, since every traveler sells them
+function travelerOffers(id) {
+  return (S.questTravelers?.[id] || []).map(t => ({ claim: `any ${t.traveler}`, source: 'traveler', seller: t.traveler,
+    stand: false, dist: null, unit: t.price / t.bundle, units: Infinity }));
+}
+
 // Buy `units` of a crafting ingredient, cheapest first: from every offer in the region the price lookup found
 // (other quests may have taken some), else from the lookup's own picks for it
 function repick(p, units, id, held) {
@@ -1053,6 +1062,7 @@ function repick(p, units, id, held) {
   const offers = region.length
     ? region.map(o => ({ claim: o.claim, source: o.source, seller: o.seller, stand: o.stand, dist: playerDist(o.x, o.z),
                          unit: Math.round(o.price / o.bundle), units: o.units }))
+        .concat(travelerOffers(id))
         .sort((a, b) => a.unit - b.unit || (a.dist ?? Infinity) - (b.dist ?? Infinity))
     : p?.picks || [];
   for (const pk of offers) {
@@ -1136,6 +1146,7 @@ function takeCrafting(id, left, into, held) {
 function questVerdict(q) {
   if (q.stale) return 'stale';   // the relay says this stage is done; its next items are on the way
   if (!q.needs.length) return 'game';
+  if ((q.levels || []).some(l => l.have < l.level)) return 'level';
   if (q._plans.some(p => p.short)) return 'short';
   if (q._plans.some(p => p.craft?.ok)) return 'craft';
   if (q._plans.some(p => p.trades.length)) return 'barter';
@@ -1364,10 +1375,16 @@ function renderActiveQuests(stallMap = buildStallMap()) {
       AQ_CARD = q.name;
       const needs = q.stale ? '' : q.needs.map((n, i) => aqNeedHtml(n, q._plans[i], [...new Set(users[n.id].filter(x => x !== q.name))])).join('');
       const track = q.tracked ? `<span class="aq-track" data-tip="Tracked in game">★</span>` : '';
+      // Traveler trades listed as quests (the next house deed) need skill levels rather than a quest stage
+      const step  = q.source
+        ? `<span class="aq-stagen" data-tip="${esc(`Not a quest: the next of ${q.traveler}'s ${q.total_stages} house deed trades you can buy`)}">${esc(q.traveler)} · ${esc(q.source)}</span>`
+        : `<span class="aq-stagen">stage ${q.stage_index + 1} of ${q.total_stages || '?'}</span>`;
+      const levels = (q.levels || []).map(l => l.have >= l.level
+        ? ` <span class="sub">${esc(l.skill)} ${l.level} ✓</span>`
+        : ` <span class="aq-tag aq-tag-short">needs ${esc(l.skill)} ${l.level} (you have ${l.have})</span>`).join('');
       return `<div class="aq-card aq-${q._verdict}">` +
-        `<div class="aq-head"><span class="aq-name">${esc(q.name)}</span>${track}` +
-        `<span class="aq-stagen">stage ${q.stage_index + 1} of ${q.total_stages || '?'}</span></div>` +
-        `<div class="aq-stage">${esc(q.stage)}</div>` +
+        `<div class="aq-head"><span class="aq-name">${esc(q.name)}</span>${track}${step}</div>` +
+        `<div class="aq-stage">${esc(q.stage)}${levels}</div>` +
         `<div class="aq-verdict">${AQ_VERDICT[q._verdict]}${cost}${extra}</div>` +
         needs +
         (q.rewards?.length ? `<div class="aq-rewards">Rewards: ${q.rewards.map(r => `<b>${esc(r)}</b>`).join(', ')}</div>` : '') +
@@ -1454,7 +1471,8 @@ function planQuestRoute() {
   const p = S.player;
   if (!S.questOffers || p?.locationX == null) return null;
   const quests = S.quests.filter(q => q.status !== 'locked' && q.needs.some(n => n.qty > n.have));
-  const wants  = quests.flatMap((q, qi) => q.needs.filter(n => n.qty > n.have)
+  // items a traveler sells can be bought from any traveler, so they don't need a stop
+  const wants  = quests.flatMap((q, qi) => q.needs.filter(n => n.qty > n.have && !S.questTravelers?.[n.id]?.length)
     .map(n => ({ qi, quest: q.name, name: n.name, id: n.id, buy: n.qty - n.have })));
   if (!wants.length) return null;
 
@@ -1548,6 +1566,7 @@ function routeHtml() {
   const which = plan.covered === plan.total ? `all ${plan.total}` : `${plan.covered} of ${plan.total}`;
   const help  = `Up to 3 stops, in any region within ${ROUTE_RADIUS_H.toLocaleString()}h. ` +
                 'Each item is bought at the stop that sells it cheapest. Best balance weighs travel against cost. ' +
+                'Items travelers sell are left out: any traveler has them. ' +
                 `Hover a stop to see what to buy there. ? means a Trader Stand, which can be moved, so it ${STAND_NOTE}.`;
   const when  = S.quests.some(q => q.status === 'next') ? 'now or next' : 'now';
   return `<div class="quest-route"><span class="route-head" data-tip="${esc(help)}">Shopping route for ${which} quests you can do ${when}:</span>${missing}` +

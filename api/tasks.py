@@ -9,7 +9,8 @@ Returns all incomplete traveler tasks for a player, enriched with:
   nearest the player (x, z)
 - Skill level requirement per task
 Plus per-traveler weekly task credits, the reroll cost, the quests that unlock more task tiers, every
-quest the player has active (with what its current stage asks for), the player's crafts in progress (what
+quest the player has active (with what its current stage asks for; the next Player House Deed from Brico's
+traveler trades is listed with them), the player's crafts in progress (what
 they'll make: it counts toward quests until collected), and
 each traveler's task pool (every task they can hand the player, for the weekly stock estimate).
 Optional: username=Name (needed to check quest level requirements), region_id=R (the player's region,
@@ -27,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(__file__))
 from recommend import pages, read_tasks, task_pool, unlocked_tiers
+import _travelers
 CACHE_S = 60   # seconds Vercel's CDN may serve this response from cache
 
 from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_player_housing_items, get_skill_levels, merge_housing, cors_headers, \
@@ -434,6 +436,18 @@ def build_tasks(tasks_data, inv_map, inv_detail, items_map, cargo_map):
     return tasks
 
 
+def house_deed(knowledge, levels, items_map, inv_map, inv_detail, region_id, warnings):
+    """The next Player House Deed to buy from Brico, as a one-entry list of active quests ([] when done)."""
+    if knowledge is None:
+        return []
+    try:
+        q = _travelers.next_house_deed(knowledge, levels, items_map, inv_map, inv_detail, region_id)
+    except Exception:
+        warnings.append('Could not load traveler trades for house deeds')
+        return []
+    return [q] if q else []
+
+
 def nearest_order_claim(order_lists, px, pz):
     """Fallback market when the relay can't list the region's markets: the nearest claim with an order."""
     best = None
@@ -503,6 +517,7 @@ class handler(BaseHTTPRequestHandler):
                 'catalog': 'task catalog',
                 'crafts':  'crafts in progress',
                 'passive': 'passive crafts',
+                'knowledge': 'your knowledge (for house deeds)',
             }
             with ThreadPoolExecutor(max_workers=10) as pool:
                 futures = {
@@ -517,6 +532,7 @@ class handler(BaseHTTPRequestHandler):
                     pool.submit(pages, '/api/traveler-tasks', 'tasks'):               'catalog',
                     pool.submit(api_get, f'/api/players/{player_id}/crafts'):         'crafts',
                     pool.submit(api_get, f'/api/players/{player_id}/passive-crafts'): 'passive',
+                    pool.submit(_travelers.player_knowledge, player_id, region_id):   'knowledge',
                 }
                 if username:
                     futures[pool.submit(get_skill_levels, username, player_id)] = 'levels'
@@ -525,7 +541,7 @@ class handler(BaseHTTPRequestHandler):
                     try:
                         results[key] = f.result()
                     except Exception:
-                        results[key] = {} if key in ('tasks', 'inv', 'my_quests', 'levels', 'crafts', 'passive') else ([], {}) if key == 'catalog' else []
+                        results[key] = None if key == 'knowledge' else {} if key in ('tasks', 'inv', 'my_quests', 'levels', 'crafts', 'passive') else ([], {}) if key == 'catalog' else []
                         warnings.append(f'Could not load {_warn_names.get(key, key)} from BitJita')
 
             tasks_data   = results.get('tasks', {})
@@ -554,7 +570,9 @@ class handler(BaseHTTPRequestHandler):
                                 for b in inv_data.get('inventories', []) if b.get('entityId')},
                 'quests':      build_quests(results.get('quests') or [], (results.get('my_quests') or {}).get('quests', []),
                                             results.get('levels') or {}, inv_map, inv_detail, items_map, cargo_map),
-                'active_quests': build_active_quests(results.get('my_quests') or {}, inv_map, inv_detail, items_map, cargo_map),
+                'active_quests': build_active_quests(results.get('my_quests') or {}, inv_map, inv_detail, items_map, cargo_map) +
+                                 house_deed(results.get('knowledge'), results.get('levels') or {}, items_map, inv_map, inv_detail,
+                                            region_id, warnings),
                 **dict(zip(('pending_crafts', 'craft_recipes'),
                            build_pending_crafts(results.get('crafts'), results.get('passive'), items_map, cargo_map))),
                 'pool':       build_pool(*results.get('catalog') or ([], {}), tasks_data, results.get('quests') or [],
