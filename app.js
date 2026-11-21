@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.20.0';
+const APP_VERSION = '1.22.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -797,13 +797,19 @@ function boughtHtml(p, tip) {
   return html;
 }
 
-// Crafting covers what can't be bought when the player has the levels and every ingredient can be had
+// Crafting covers what can't be bought when the player has the levels and every ingredient can be had,
+// bought, or crafted in turn
 function craftable(pr) {
   const c = pr.craft;
-  return !!c && c.levels.every(l => l.have >= l.level) && c.ingredients.every(i => !i.short);
+  return !!c && c.levels.every(l => l.have >= l.level) && c.ingredients.every(i => !i.short || craftable(i));
 }
 
-function craftHtml(n, c, region) {
+// What crafting costs: the ingredients to buy, plus those of ingredients crafted in turn
+function craftCost(c) {
+  return c.ingredients.reduce((s, i) => s + i.cost + (i.short && craftable(i) ? craftCost(i.craft) : 0), 0);
+}
+
+function craftHtml(n, c, region, depth = 0) {
   const levels = c.levels.map(l => l.have >= l.level
     ? `<span class="sub">${esc(l.skill)} ${l.level} ✓</span>`
     : `<span class="quest-req">needs ${esc(l.skill)} ${l.level} (you have ${l.have})</span>`).join(' ');
@@ -813,8 +819,9 @@ function craftHtml(n, c, region) {
     const status = i.buy ? boughtHtml(i, tip) : ` <span class="inv-ok">have</span>`;
     return `<span class="quest-have" data-tip="${esc(tip)}">${i.qty.toLocaleString()}× ${esc(i.name)}</span>${status}`;
   }).join(', ');
-  return `<div class="quest-craft">↳ Craft ${c.makes.toLocaleString()} ${esc(n.name)} ` +
-    `<span class="sub">(${c.crafts.toLocaleString()}× ${esc(c.recipe)} at ${esc(c.building)})</span> ${levels}: ${ingredients}</div>`;
+  const deeper = c.ingredients.filter(i => i.short && i.craft).map(i => craftHtml(i, i.craft, region, depth + 1)).join('');
+  return `<div class="quest-craft" style="padding-left:${114 + depth * 16}px">↳ Craft ${c.makes.toLocaleString()} ${esc(n.name)} ` +
+    `<span class="sub">(${c.crafts.toLocaleString()}× ${esc(c.recipe)} at ${esc(c.building)})</span> ${levels}: ${ingredients}</div>` + deeper;
 }
 
 function renderQuests() {
@@ -851,7 +858,7 @@ function renderQuests() {
       else if (prices.length) {
         const crafting = prices.filter(p => p.short && craftable(p));
         const total = prices.reduce((sum, p) => sum + p.cost, 0) +
-          crafting.reduce((sum, p) => sum + p.craft.ingredients.reduce((s, i) => s + i.cost, 0), 0);
+          crafting.reduce((sum, p) => sum + craftCost(p.craft), 0);
         const short = prices.some(p => p.short && !craftable(p)) ? ' + items not for sale' : '';
         const how   = crafting.length ? ' with crafting' : '';
         cost = total || !short
@@ -885,12 +892,13 @@ const AQ_VERDICT = {
   housing: 'Ready with items from player housing',
   buy:     'Can finish by buying',
   barter:  'Can finish with barter trades',
+  craft:   'Can finish by crafting',
   short:   'Missing items',
   game:    'Do this step in game',
   stale:   'Stage moved on in game — updating…',
 };
-const AQ_RANK = { ready: 0, housing: 1, buy: 2, barter: 3, short: 4, game: 5, stale: 6 };
-const AQ_DONE = new Set(['ready', 'housing', 'buy', 'barter']);
+const AQ_RANK = { ready: 0, housing: 1, buy: 2, barter: 3, craft: 4, short: 5, game: 6, stale: 7 };
+const AQ_DONE = new Set(['ready', 'housing', 'buy', 'barter', 'craft']);
 const AQ_FILTERS = [
   ['all',   'All',           () => true],
   ['done',  'Can complete',  q => AQ_DONE.has(q._verdict)],
@@ -956,16 +964,66 @@ function questNeedPlan(n, stallMap) {
       left -= units;
     }
     if (left > 0 && S.questPrices === 'loading') plan.pricing = true;
-    if (left > 0 && pr?.craft) plan.craft = pr.craft;
+    // Crafting what can't be had otherwise: the recipe's ingredients, each from storage, housing or the market
+    if (left > 0 && pr?.craft) {
+      plan.craft = questCraftPlan(pr.craft, left, stallMap);
+      if (plan.craft.ok) {
+        plan.cost += plan.craft.cost;
+        left = 0;
+      }
+    }
   }
   plan.short = Math.max(0, left);
   return plan;
+}
+
+// Buy `units` from a price lookup's picks, cheapest first (the lookup may have priced a larger amount)
+function repick(p, units) {
+  let left = units, cost = 0;
+  const picks = [];
+  for (const pk of p?.picks || []) {
+    if (left <= 0) break;
+    const u = Math.min(pk.units, left);
+    picks.push({ ...pk, units: u, cost: u * pk.unit });
+    cost += u * pk.unit;
+    left -= u;
+  }
+  return { cost, short: Math.max(0, left), picks };
+}
+
+// Crafting `units` of a quest item: how many crafts, and per ingredient what the player has, what added
+// housing holds and what the region sells. ok = the player has the levels and every ingredient can be had.
+function questCraftPlan(c, units, stallMap) {
+  const perCraft = c.per_craft || Math.max(1, Math.floor(c.makes / c.crafts));
+  const crafts   = Math.ceil(units / perCraft);
+  const ings = c.ingredients.map(i => {
+    const qty = Math.ceil((i.per ?? i.qty / c.crafts) * crafts);
+    const own = Math.min(qty, i.have || 0);
+    let left  = qty - own;
+    const housing = [];
+    for (const e of (stallMap[i.id] || []).filter(e => e.isHousing)) {
+      if (left <= 0) break;
+      const u = Math.min(left, e.stock || 0);
+      if (u > 0) { housing.push({ who: e.owner, where: e.storageLabel, units: u }); left -= u; }
+    }
+    const bought = left > 0 ? repick(i, left) : { cost: 0, short: 0, picks: [] };
+    // Not for sale either: craft it too, when the lookup found its recipe
+    const craft  = bought.short && i.craft ? questCraftPlan(i.craft, bought.short, stallMap) : null;
+    const short  = craft?.ok ? 0 : bought.short;
+    return { id: i.id, name: i.name, where: i.where || [], qty, own, housing, bought, craft, short,
+             cost: bought.cost + (craft?.ok ? craft.cost : 0) };
+  });
+  const lowLevels = c.levels.filter(l => l.have < l.level);
+  const cost = ings.reduce((s, i) => s + i.cost, 0);
+  return { recipe: c.recipe, building: c.building, crafts, makes: units, levels: c.levels, lowLevels, ings, cost,
+           ok: !lowLevels.length && ings.every(i => !i.short) };
 }
 
 function questVerdict(q) {
   if (q.stale) return 'stale';   // the relay says this stage is done; its next items are on the way
   if (!q.needs.length) return 'game';
   if (q._plans.some(p => p.short)) return 'short';
+  if (q._plans.some(p => p.craft?.ok)) return 'craft';
   if (q._plans.some(p => p.trades.length)) return 'barter';
   if (q._plans.some(p => p.buys.length)) return 'buy';
   if (q._plans.some(p => p.housing.length)) return 'housing';
@@ -1003,21 +1061,54 @@ function aqNeedHtml(n, p, sharedBy) {
   else if (p.short) {
     const why = n.id === HEX_COIN_ID ? 'Hex Coin has to be earned' : 'Not for sale on your region\'s market or at the stalls in market range';
     tags.push(`<span class="aq-tag aq-tag-short" data-tip="${esc(why)}">${p.short.toLocaleString()} missing</span>`);
-    if (p.craft) {
-      const c   = p.craft;
-      const lv  = c.levels.filter(l => l.have < l.level).map(l => `${l.skill} ${l.level} (you have ${l.have})`);
-      const tip = `Craft ${c.makes.toLocaleString()}: ${c.crafts.toLocaleString()}× ${c.recipe} at ${c.building}\n` +
-        c.ingredients.map(i => `${i.qty.toLocaleString()}× ${i.name}${i.have ? ` — have ${i.have.toLocaleString()}` : ''}` +
-          `${i.buy && !i.short ? ` — buy for ${HEX}${i.cost.toLocaleString()}` : ''}${i.short ? ` — ${i.short.toLocaleString()} not for sale` : ''}`).join('\n') +
-        (lv.length ? `\nNeeds ${lv.join(', ')}` : '');
-      tags.push(`<span class="aq-tag aq-tag-craft" data-tip="${esc(tip)}">craft at ${esc(c.building || 'a station')}${craftable({ craft: c }) ? ' ✓' : ''}</span>`);
-    }
+  }
+  if (p.craft) {
+    const c = p.craft;
+    tags.push(`<span class="aq-tag ${c.ok ? 'aq-tag-craft-ok' : 'aq-tag-craft'}" data-tip="${esc(`${c.crafts.toLocaleString()}× ${c.recipe} at ${c.building}`)}">` +
+      `craft ${c.makes.toLocaleString()}${c.cost ? ` for ${HEX}${c.cost.toLocaleString()}` : ''}</span>`);
   }
   const shared = sharedBy.length ? ` <span class="aq-keep" data-tip="${esc(`Also needed by: ${sharedBy.join(', ')}\nEach quest is checked on its own, so the same items count for each.`)}">shared</span>` : '';
   const kept   = n.consumed ? '' : ` <span class="aq-keep" data-tip="Only has to be in your inventory; the quest doesn't take it">kept</span>`;
   return `<div class="aq-need"><span class="aq-item">${esc(n.name)}${kept}${shared}</span>` +
     `<span class="aq-count ${cls}">${Math.min(got, n.qty).toLocaleString()}<span class="sub"> / ${n.qty.toLocaleString()}</span></span>` +
-    `<span class="aq-src">${tags.join('')}</span></div>`;
+    `<span class="aq-src">${tags.join('')}</span>${p.craft ? aqRecipeHtml(p.craft) : ''}</div>`;
+}
+
+// The recipe and one row per ingredient: what you have, what added housing holds, what to buy and where
+function aqRecipeHtml(c) {
+  const levels = c.levels.map(l => l.have >= l.level
+    ? `<span class="sub">${esc(l.skill)} ${l.level} ✓</span>`
+    : `<span class="aq-tag aq-tag-short">needs ${esc(l.skill)} ${l.level} (you have ${l.have})</span>`).join(' ');
+  const rows = c.ings.map(i => {
+    const got  = i.own + i.housing.reduce((s, h) => s + h.units, 0);
+    const buy  = i.bought.picks.reduce((s, pk) => s + pk.units, 0);
+    const cls  = i.short ? (got + buy ? 'stock-part-t' : 'stock-none-t') : 'stock-ok-t';
+    const tags = [];
+    if (i.own) {
+      const where = [...i.where].sort((a, b) => b.qty - a.qty).map(l => `${l.qty.toLocaleString()} in ${l.label}`).join('\n');
+      tags.push(`<span class="aq-tag aq-tag-have" data-tip="${esc(where || 'In your inventory')}">have ${i.own.toLocaleString()}</span>`);
+    }
+    for (const h of i.housing) {
+      tags.push(`<span class="aq-tag aq-tag-house" data-tip="${esc(`${h.units.toLocaleString()} in ${h.who}'s house${h.where ? ` (${h.where})` : ''}`)}">` +
+        `${h.units.toLocaleString()} at ${esc(h.who)}'s house</span>`);
+    }
+    if (buy) {
+      const where = [...new Set(i.bought.picks.map(pk => pk.claim))];
+      tags.push(`<span class="aq-tag aq-tag-buy" data-tip="${esc(i.bought.picks.map(pickLine).join('\n'))}">buy ${buy.toLocaleString()} for ` +
+        `${HEX}${i.bought.cost.toLocaleString()} <span class="sub">${esc(where.length === 1 ? where[0] : `${where.length} places`)}</span>` +
+        `${i.bought.picks.some(pk => pk.stand) ? STAND_MARK : ''}</span>`);
+    }
+    if (i.short) tags.push(`<span class="aq-tag aq-tag-short" data-tip="Not for sale on your region's market">${i.short.toLocaleString()} missing</span>`);
+    if (i.craft) {
+      tags.push(`<span class="aq-tag ${i.craft.ok ? 'aq-tag-craft-ok' : 'aq-tag-craft'}">craft ${i.craft.makes.toLocaleString()}` +
+        `${i.craft.cost ? ` for ${HEX}${i.craft.cost.toLocaleString()}` : ''}</span>`);
+    }
+    return `<div class="aq-ing"><span class="aq-item">${esc(i.name)}</span>` +
+      `<span class="aq-count ${cls}">${Math.min(got + buy, i.qty).toLocaleString()}<span class="sub"> / ${i.qty.toLocaleString()}</span></span>` +
+      `<span class="aq-src">${tags.join('')}</span>${i.craft ? aqRecipeHtml(i.craft) : ''}</div>`;
+  }).join('');
+  return `<div class="aq-recipe"><div class="aq-recipe-head">↳ ${c.crafts.toLocaleString()}× ${esc(c.recipe)} ` +
+    `<span class="sub">at ${esc(c.building || 'a crafting station')}</span> ${levels}</div>${rows}</div>`;
 }
 
 function renderActiveQuests(stallMap = buildStallMap()) {
@@ -1043,7 +1134,9 @@ function renderActiveQuests(stallMap = buildStallMap()) {
   const help = 'Checks the current stage of each quest you have started.\n' +
     `Items come from your inventories, banks and house first${houses ? ', then the player housing you added' : ''},\n` +
     `then the cheapest coin offers on the ${S.questRegion || 'region'} market and at stalls and Trader Stands within ${range}h of ${claim || 'you'},\n` +
-    'then barter trades at those stalls. Move the market range slider to look further for stalls.';
+    'then barter trades at those stalls. Anything still missing is crafted when you have the levels and every\n' +
+    "ingredient can be had from your storage, added housing or the region's market (stalls included).\n" +
+    'Move the market range slider to look further for stalls.';
   aqSection.innerHTML =
     `<div class="aq-summary"><span class="exp-label" style="display:inline;margin:0">` +
     `<span data-tip="${esc(help)}" style="cursor:default;border-bottom:1px dotted #444466">Active quests</span></span>` +
@@ -1090,7 +1183,13 @@ function pickupHtml() {
       if (n.have) wanted.push({ id: n.id, name: n.name, qty: n.qty, where: n.where || [] });
       const pr = questItemPrice(n);
       if (pr?.short && craftable(pr)) {
-        for (const i of pr.craft.ingredients) if (i.have) wanted.push({ id: i.id, name: i.name, qty: i.qty, where: i.where || [] });
+        const gather = c => {
+          for (const i of c.ingredients) {
+            if (i.have) wanted.push({ id: i.id, name: i.name, qty: i.qty, where: i.where || [] });
+            if (i.short && i.craft) gather(i.craft);   // ingredients crafted in turn
+          }
+        };
+        gather(pr.craft);
       }
     }
   }

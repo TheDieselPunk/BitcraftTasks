@@ -12,8 +12,10 @@ Returns:
     short = units that can't be bought in the region; dist is in display units (raw / 3)
     seller = the market order's owner, or the stall to look for, like "sfmason's Sturdy Barter Stall (Rumbagh T1 5)"
     stand = sold from a Trader Stand, which can be moved or packed away, so it may not be at the claim
-    craft = {recipe, building, crafts, makes, levels: [{skill, level, have}],
-             ingredients: [{id, type, name, qty, have, where, buy, cost, short, picks}]}
+    craft = {recipe, building, crafts, makes, per_craft, levels: [{skill, level, have}],
+             ingredients: [{id, type, name, per, qty, have, where, buy, cost, short, picks}]}
+    per_craft = units one craft makes; per = how many of the ingredient one craft uses
+    an ingredient that isn't for sale has its own craft (same shape), up to CRAFT_DEPTH levels deep
     where = [{qty, label, container, place, elsewhere}]: the player's containers holding the ingredient
   - offers: {id: [{claim, region, x, z, price, bundle, units, source, seller, stand}]}: every offer within
     ROUTE_RADIUS of the player in any region, for planning a shopping route (price is per bundle)
@@ -37,6 +39,16 @@ from _lib import api_get, distance, cors_headers, get_claims, build_inv_map, bui
 INFINITE_STOCK = 2_000_000_000
 HEX_COIN_ID    = '1'
 ROUTE_RADIUS   = 3000   # how far (display units) to look for shopping-route stops, in any region
+CRAFT_DEPTH    = 3      # recipe levels to follow for ingredients that aren't for sale
+
+# Recipes rarely change, so the ones quests can need are stored: {"item:ID" | "cargo:ID": {craftingRecipes}}.
+# Refresh with: python tools/build_quest_recipes.py
+try:
+    with open(os.path.join(os.path.dirname(__file__), 'quest_recipes.json'), encoding='utf-8') as f:
+        STORED_RECIPES = json.load(f).get('recipes', {})
+except (OSError, ValueError):
+    STORED_RECIPES = {}
+_fetched_recipes = {}   # recipes looked up on BitJita for items the stored file doesn't have
 
 
 def dist_h(px, pz, x, z):
@@ -151,13 +163,50 @@ def cheapest(need, sources):
     return {'buy': need, 'cost': cost, 'short': max(0, left), 'picks': picks}
 
 
+def pick_recipe(detail):
+    """The recipe to craft an item with, or None. "Unpack ... Package" recipes need a package made from the
+    item itself, so any other recipe comes first."""
+    recipes = [r for r in (detail or {}).get('craftingRecipes') or [] if r.get('consumedItems')]
+    return next((r for r in recipes if not (r.get('name') or '').startswith('Unpack')), recipes[0]) if recipes else None
+
+
+def slim_recipe(r):
+    """Just the recipe fields craft_plan reads, for the stored recipe file."""
+    return {
+        'name':              r.get('name', ''),
+        'buildingName':      r.get('buildingName', ''),
+        'outputQuantity':    r.get('outputQuantity'),
+        'craftedItems':      [{'id': o.get('id'), 'quantity': o.get('quantity')} for o in r.get('craftedItems') or []],
+        'consumedItems':     [{'id': c.get('id'), 'quantity': c.get('quantity'), 'itemType': c.get('itemType'),
+                               'name': c.get('name')} for c in r.get('consumedItems') or []],
+        'levelRequirements': [{'skill_id': l.get('skill_id'), 'level': l.get('level'),
+                               'skill': {'name': (l.get('skill') or {}).get('name')}} for l in r.get('levelRequirements') or []],
+    }
+
+
+def detail_path(key):
+    return f'/api/{"cargo" if key[1] == "cargo" else "items"}/{key[0]}'
+
+
+def recipe_detail(key):
+    """{craftingRecipes: [recipe]} for an (id, type) key: from the stored recipe file (tools/build_quest_recipes.py
+    writes it for every quest item and their ingredients), else from BitJita, kept for the warm instance."""
+    k = f'{key[1]}:{key[0]}'
+    if k in STORED_RECIPES:
+        return STORED_RECIPES[k]
+    if k not in _fetched_recipes:
+        detail = fetch(detail_path(key))
+        if detail is None:
+            return None   # failed: try again next time
+        _fetched_recipes[k] = {'craftingRecipes': [slim_recipe(r) for r in detail.get('craftingRecipes') or []]}
+    return _fetched_recipes[k]
+
+
 def craft_plan(key, units, detail, have, where, levels):
     """How to craft `units` of an item: its recipe and the ingredients still needed. None without a recipe."""
-    recipes = [r for r in (detail or {}).get('craftingRecipes') or [] if r.get('consumedItems')]
-    if not recipes:
+    recipe = pick_recipe(detail)
+    if not recipe:
         return None
-    # "Unpack ... Package" recipes need a package made from the item itself
-    recipe = next((r for r in recipes if not (r.get('name') or '').startswith('Unpack')), recipes[0])
     makes  = next((o.get('quantity') for o in recipe.get('craftedItems', []) if str(o.get('id')) == key[0]), None) \
         or recipe.get('outputQuantity') or 1
     crafts = math.ceil(units / makes)
@@ -167,12 +216,13 @@ def craft_plan(key, units, detail, have, where, levels):
         qty = (c.get('quantity') or 1) * crafts
         got = have.get(iid, 0)
         ingredients.append({'id': iid, 'type': 'cargo' if c.get('itemType') == 1 else 'item', 'name': c.get('name') or iid,
-                            'qty': qty, 'have': got, 'buy': max(0, qty - got), 'where': where.get(iid, []) if got else []})
+                            'per': c.get('quantity') or 1, 'qty': qty, 'have': got, 'buy': max(0, qty - got), 'where': where.get(iid, []) if got else []})
     return {
         'recipe':      recipe.get('name', ''),
         'building':    recipe.get('buildingName', ''),
         'crafts':      crafts,
         'makes':       units,
+        'per_craft':   makes,
         'levels':      [{'skill': (r.get('skill') or {}).get('name') or f"Skill {r.get('skill_id')}", 'level': r.get('level'),
                          'have': int(levels.get(str(r.get('skill_id')), 0))} for r in recipe.get('levelRequirements') or []],
         'ingredients': ingredients,
@@ -322,23 +372,37 @@ class handler(BaseHTTPRequestHandler):
             src.add_stalls(need)
             items = {k[0]: src.in_region(k, n) for k, n in need.items()}
 
-            # Crafting what the region can't supply: recipes, then where to buy the missing ingredients
-            short = [k for k in need if items[k[0]]['short']]
-            if short:
+            # Crafting what the region can't supply: recipes, then where to buy the missing ingredients. An
+            # ingredient that isn't for sale either gets its own recipe, down to CRAFT_DEPTH levels.
+            # pending = [(key, the dict that gets the 'craft', the items above it in the recipe tree)]
+            pending = [(k, items[k[0]], {k}) for k in need if items[k[0]]['short']]
+            details = {}
+            priced  = set(need)
+            for _ in range(CRAFT_DEPTH):
+                if not pending:
+                    break
+                todo = list({k for k, _, _ in pending} - set(details))
                 with ThreadPoolExecutor(max_workers=10) as pool:
-                    details = list(pool.map(lambda k: fetch(f'/api/{"cargo" if k[1] == "cargo" else "items"}/{k[0]}'), short))
-                plans = {k: craft_plan(k, items[k[0]]['short'], d, have, where, levels) for k, d in zip(short, details)}
-                plans = {k: p for k, p in plans.items() if p}
-                extra = {(i['id'], i['type']) for p in plans.values() for i in p['ingredients'] if i['buy']} - set(need)
+                    details.update(zip(todo, pool.map(recipe_detail, todo)))
+                plans = []
+                for k, holder, above in pending:
+                    p = craft_plan(k, holder['short'], details.get(k), have, where, levels)
+                    if p:
+                        holder['craft'] = p
+                        plans.append((p, above))
+                extra = {(i['id'], i['type']) for p, _ in plans for i in p['ingredients'] if i['buy']} - priced
                 if extra:
                     with ThreadPoolExecutor(max_workers=10) as pool:
                         add_markets(market(pool, extra))
                     src.add_stalls(extra)
-                for k, p in plans.items():
+                    priced |= extra
+                pending = []
+                for p, above in plans:
                     for ing in p['ingredients']:
-                        ing.update(src.in_region((ing['id'], ing['type']), ing['buy']) if ing['buy']
-                                   else {'cost': 0, 'short': 0, 'picks': []})
-                    items[k[0]]['craft'] = p
+                        ik = (ing['id'], ing['type'])
+                        ing.update(src.in_region(ik, ing['buy']) if ing['buy'] else {'cost': 0, 'short': 0, 'picks': []})
+                        if ing['short'] and ik not in above:   # no recipe loops
+                            pending.append((ik, ing, above | {ik}))
 
             route_fields = ('claim', 'region', 'x', 'z', 'price', 'bundle', 'units', 'source', 'seller', 'stand')
             self._send(200, {

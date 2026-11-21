@@ -1,6 +1,7 @@
 {
   "functions": {
-    "api/recommend.py": { "maxDuration": 60 }
+    "api/recommend.py": { "maxDuration": 60 },
+    "api/quest_prices.py": { "includeFiles": "api/quest_recipes.json" }
   },
   "rewrites": [
     { "source": "/api/search", "destination": "/api/search.py" },
