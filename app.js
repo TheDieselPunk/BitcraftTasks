@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.23.0';
+const APP_VERSION = '1.26.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -31,7 +31,9 @@ const S = {
   rerollCost:    null,
   creditsReset:  null,
   quests:        [],
-  activeQuests:  [],     // every quest the player has started: [{id, name, stage, needs, other, rewards, ...}]
+  activeQuests:  [],
+  pendingCrafts: [],     // the player's crafts in progress (BitJita): [{key, kind, recipe_id, count, building, claim, done}]
+  craftRecipes:  {},     // {recipe_id: {building, outputs: [{id, type, name, qty}]}}: what one craft makes     // every quest the player has started: [{id, name, stage, needs, other, rewards, ...}]
   aqFilter:      'all',  // Quests tab filter: all | done | short | game
   tab:           localStorage.getItem('bcTasks_tab') === 'quests' ? 'quests' : 'tasks',
   questPrices:   null,   // {item_id: {buy, cost, short, picks, craft?}}, or 'loading'
@@ -306,6 +308,8 @@ async function loadTasks(fresh = false) {
     S.creditsReset = resets.length ? Math.min(...resets) : null;
     S.quests       = data.quests || [];
     S.activeQuests = data.active_quests || [];
+    S.pendingCrafts = data.pending_crafts || [];
+    S.craftRecipes  = data.craft_recipes || {};
     S.pool         = data.pool || {};
     S.invBags      = data.inv_bags || {};
     S.tasksLoaded  = true;
@@ -315,6 +319,7 @@ async function loadTasks(fresh = false) {
     liveApplyCredits();
     liveApplyInventory();
     liveApplyQuests(false);
+    liveApplyCrafts(false);
     L.dirty = L.creditsDirty = false;   // everything below renders anyway
     showWarnings(data.warnings);
     renderCredits();
@@ -335,9 +340,21 @@ async function loadTasks(fresh = false) {
 async function loadQuestPrices(fresh = false) {
   const quests = S.quests;
   const need   = {};
-  for (const q of [...quests, ...S.activeQuests]) for (const n of q.needs) {
+  // Active quests draw on the same stock, so ask for what they need together; every item is asked about,
+  // even ones the player has enough of alone, so its offers are known when quests share it
+  const demand = {}, have = {};
+  for (const q of S.activeQuests) for (const n of q.needs) {
     const key = `${n.id}:${n.type}`;
-    if (n.id !== HEX_COIN_ID && n.qty > n.have) need[key] = Math.max(need[key] || 0, n.qty - n.have);
+    demand[key] = (demand[key] || 0) + n.qty;
+    have[key]   = n.have;
+  }
+  for (const q of quests) for (const n of q.needs) {
+    const key = `${n.id}:${n.type}`;
+    demand[key] = Math.max(demand[key] || 0, n.qty);
+    have[key]   = n.have;
+  }
+  for (const [key, qty] of Object.entries(demand)) {
+    if (!key.startsWith(`${HEX_COIN_ID}:`)) need[key] = Math.max(1, qty - (have[key] || 0));
   }
   if (!Object.keys(need).length) return;
   S.questPrices = 'loading';
@@ -890,6 +907,7 @@ const HEX_COIN_ID = '1';
 const AQ_VERDICT = {
   ready:   'Ready to hand in — you have everything',
   housing: 'Ready with items from player housing',
+  pending: 'Ready once your crafts finish',
   buy:     'Can finish by buying',
   barter:  'Can finish with barter trades',
   craft:   'Can finish by crafting',
@@ -897,8 +915,8 @@ const AQ_VERDICT = {
   game:    'Do this step in game',
   stale:   'Stage moved on in game — updating…',
 };
-const AQ_RANK = { ready: 0, housing: 1, buy: 2, barter: 3, craft: 4, short: 5, game: 6, stale: 7 };
-const AQ_DONE = new Set(['ready', 'housing', 'buy', 'barter', 'craft']);
+const AQ_RANK = { ready: 0, housing: 1, pending: 2, buy: 3, barter: 4, craft: 5, short: 6, game: 7, stale: 8 };
+const AQ_DONE = new Set(['ready', 'housing', 'pending', 'buy', 'barter', 'craft']);
 const AQ_FILTERS = [
   ['all',   'All',           () => true],
   ['done',  'Can complete',  q => AQ_DONE.has(q._verdict)],
@@ -917,16 +935,65 @@ function coinOnly(e) {
   return !e.isBarter && e.price_parts?.length === 1 && hexPrice(e.price_parts) != null;
 }
 
-// How one stage item gets covered: {own, housing, buys, trades, short, cost, pricing, craft}
-function questNeedPlan(n, stallMap) {
-  const plan = { own: Math.min(n.qty, n.have), housing: [], buys: [], trades: [], short: 0, cost: 0, pricing: false, craft: null };
-  let left = n.qty - plan.own;
-  const entries = stallMap[n.id] || [];
-  for (const e of entries.filter(e => e.isHousing)) {
-    if (left <= 0) break;
-    const units = Math.min(left, e.stock || 0);
-    if (units > 0) { plan.housing.push({ who: e.owner, where: e.storageLabel, units }); left -= units; }
+// ── Shared stock ──────────────────────────────────────────────────────────────
+// Quests draw on the same storage, crafts in progress, houses and offers, so each unit may only count once.
+// renderActiveQuests plans every quest on its own first, then again in order (quests that can be finished
+// first) with a ledger: claim() hands out what's left of a source and notes which quest took it. Without a
+// ledger every quest sees all of it.
+let LEDGER = null;   // Map: source key -> {left, by: Set of quest names}
+let CLAIM  = null;   // the quest being planned: {quest, keep, dry}. keep: it only has to be held, not handed
+                     // in, so it isn't used up; dry: trying a craft out, nothing is used up yet
+
+// Up to `want` of a source holding `cap` units; `held` collects the quests that took what's missing
+function claim(key, cap, want, held) {
+  const full = Math.max(0, Math.min(cap, want));
+  if (!LEDGER || full <= 0) return full;
+  if (!LEDGER.has(key)) LEDGER.set(key, { cap, left: cap, by: new Set() });
+  const e   = LEDGER.get(key);
+  if (cap > e.cap) {   // counts can come from loads made at different times: go by the largest
+    e.left += cap - e.cap;
+    e.cap   = cap;
   }
+  const got = Math.max(0, Math.min(e.left, want));
+  if (got < full) for (const b of e.by) held?.add(b);
+  if (got > 0 && CLAIM && !CLAIM.keep && !CLAIM.dry) {
+    e.left -= got;
+    e.by.add(CLAIM.quest);
+  }
+  return got;
+}
+
+// A craft plan that only uses up its ingredients if it can go ahead: tried out first, then claimed for real
+function planCraft(c, units, stallMap) {
+  if (!LEDGER || !CLAIM || CLAIM.dry) return questCraftPlan(c, units, stallMap);
+  const keep = CLAIM.keep;
+  Object.assign(CLAIM, { dry: true, keep: false });   // crafting uses the ingredients even for a kept item
+  let plan = questCraftPlan(c, units, stallMap);
+  CLAIM.dry = false;
+  if (plan.ok) plan = questCraftPlan(c, units, stallMap);
+  CLAIM.keep = keep;
+  return plan;
+}
+
+// Housing entries of an item, taken into `into` ({who, where, units}); returns what's still left
+function takeHousing(id, left, into, stallMap, held) {
+  for (const e of (stallMap[id] || []).filter(e => e.isHousing)) {
+    if (left <= 0) break;
+    const units = claim(`house:${id}:${e.owner}:${e.storageLabel}`, e.stock || 0, left, held);
+    if (units > 0) { into.push({ who: e.owner, where: e.storageLabel, units }); left -= units; }
+  }
+  return left;
+}
+
+// How one stage item gets covered: {own, crafting, housing, buys, trades, short, cost, pricing, craft, heldBy}
+function questNeedPlan(n, stallMap) {
+  const held = new Set();
+  const plan = { own: 0, crafting: [], housing: [], buys: [], trades: [], short: 0, cost: 0, pricing: false, craft: null, heldBy: held };
+  plan.own = claim(`own:${n.id}`, n.have, n.qty, held);
+  let left = n.qty - plan.own;
+  left = takeCrafting(n.id, left, plan.crafting, held);
+  left = takeHousing(n.id, left, plan.housing, stallMap, held);
+  const entries = stallMap[n.id] || [];
   if (left > 0 && n.id !== HEX_COIN_ID) {
     // Coin offers: the region's market (from the quest price lookup) and the stalls in market range
     const cands = [];
@@ -948,7 +1015,7 @@ function questNeedPlan(n, stallMap) {
     cands.sort((a, b) => a.unit - b.unit || (a.dist ?? Infinity) - (b.dist ?? Infinity));
     for (const c of cands) {
       if (left <= 0) break;
-      const units = Math.min(left, c.units);
+      const units = claim(`offer:${n.id}:${c.kind}:${c.label}:${c.seller}:${c.unit}`, c.units, left, held);
       if (units <= 0) continue;
       const cost = Math.round(units * c.unit);
       plan.buys.push({ ...c, units, cost });
@@ -958,7 +1025,7 @@ function questNeedPlan(n, stallMap) {
     // Barter: stalls in range that trade the item for other goods
     for (const e of entries.filter(e => !e.isHousing && !coinOnly(e))) {
       if (left <= 0) break;
-      const units = Math.min(left, e.stock == null ? left : e.stock);
+      const units = claim(`trade:${n.id}:${e.claimName || e.name}:${e.name}`, e.stock == null ? Infinity : e.stock, left, held);
       if (units <= 0) continue;
       plan.trades.push({ units, label: e.claimName || e.name, seller: e.name, dist: e.distance, price_parts: e.price_parts || [] });
       left -= units;
@@ -966,7 +1033,7 @@ function questNeedPlan(n, stallMap) {
     if (left > 0 && S.questPrices === 'loading') plan.pricing = true;
     // Crafting what can't be had otherwise: the recipe's ingredients, each from storage, housing or the market
     if (left > 0 && pr?.craft) {
-      plan.craft = questCraftPlan(pr.craft, left, stallMap);
+      plan.craft = planCraft(pr.craft, left, stallMap);
       if (plan.craft.ok) {
         plan.cost += plan.craft.cost;
         left = 0;
@@ -977,13 +1044,21 @@ function questNeedPlan(n, stallMap) {
   return plan;
 }
 
-// Buy `units` from a price lookup's picks, cheapest first (the lookup may have priced a larger amount)
-function repick(p, units) {
+// Buy `units` of a crafting ingredient, cheapest first: from every offer in the region the price lookup found
+// (other quests may have taken some), else from the lookup's own picks for it
+function repick(p, units, id, held) {
   let left = units, cost = 0;
-  const picks = [];
-  for (const pk of p?.picks || []) {
+  const picks  = [];
+  const region = (S.questOffers?.[id] || []).filter(o => !S.questRegion || o.region === S.questRegion);
+  const offers = region.length
+    ? region.map(o => ({ claim: o.claim, source: o.source, seller: o.seller, stand: o.stand, dist: playerDist(o.x, o.z),
+                         unit: Math.round(o.price / o.bundle), units: o.units }))
+        .sort((a, b) => a.unit - b.unit || (a.dist ?? Infinity) - (b.dist ?? Infinity))
+    : p?.picks || [];
+  for (const pk of offers) {
     if (left <= 0) break;
-    const u = Math.min(pk.units, left);
+    const u = claim(`pick:${id}:${pk.claim}:${pk.seller}:${pk.unit}`, pk.units, left, held);
+    if (u <= 0) continue;
     picks.push({ ...pk, units: u, cost: u * pk.unit });
     cost += u * pk.unit;
     left -= u;
@@ -991,32 +1066,71 @@ function repick(p, units) {
   return { cost, short: Math.max(0, left), picks };
 }
 
-// Crafting `units` of a quest item: how many crafts, and per ingredient what the player has, what added
-// housing holds and what the region sells. ok = the player has the levels and every ingredient can be had.
+// Crafting `units` of a quest item: how many crafts, and per ingredient what the player has, what their crafts
+// in progress make, what added housing holds and what the region sells. ok = the player has the levels and
+// every ingredient can be had.
 function questCraftPlan(c, units, stallMap) {
   const perCraft = c.per_craft || Math.max(1, Math.floor(c.makes / c.crafts));
   const crafts   = Math.ceil(units / perCraft);
   const ings = c.ingredients.map(i => {
-    const qty = Math.ceil((i.per ?? i.qty / c.crafts) * crafts);
-    const own = Math.min(qty, i.have || 0);
-    let left  = qty - own;
-    const housing = [];
-    for (const e of (stallMap[i.id] || []).filter(e => e.isHousing)) {
-      if (left <= 0) break;
-      const u = Math.min(left, e.stock || 0);
-      if (u > 0) { housing.push({ who: e.owner, where: e.storageLabel, units: u }); left -= u; }
-    }
-    const bought = left > 0 ? repick(i, left) : { cost: 0, short: 0, picks: [] };
+    const held = new Set();
+    const qty  = Math.ceil((i.per ?? i.qty / c.crafts) * crafts);
+    const own  = claim(`own:${i.id}`, i.have || 0, qty, held);
+    let left   = qty - own;
+    const crafting = [], housing = [];
+    left = takeCrafting(i.id, left, crafting, held);
+    left = takeHousing(i.id, left, housing, stallMap, held);
+    const bought = left > 0 ? repick(i, left, i.id, held) : { cost: 0, short: 0, picks: [] };
     // Not for sale either: craft it too, when the lookup found its recipe
-    const craft  = bought.short && i.craft ? questCraftPlan(i.craft, bought.short, stallMap) : null;
+    const craft  = bought.short && i.craft ? planCraft(i.craft, bought.short, stallMap) : null;
     const short  = craft?.ok ? 0 : bought.short;
-    return { id: i.id, name: i.name, where: i.where || [], qty, own, housing, bought, craft, short,
+    return { id: i.id, name: i.name, where: i.where || [], qty, own, crafting, housing, bought, craft, short, heldBy: held,
              cost: bought.cost + (craft?.ok ? craft.cost : 0) };
   });
   const lowLevels = c.levels.filter(l => l.have < l.level);
   const cost = ings.reduce((s, i) => s + i.cost, 0);
   return { recipe: c.recipe, building: c.building, crafts, makes: units, levels: c.levels, lowLevels, ings, cost,
            ok: !lowLevels.length && ings.every(i => !i.short) };
+}
+
+// What the player's crafts will hand them, by item id: {id: [{units, label, done, tip}]}. Crafts at stations
+// and passive crafts (refining, tanning...) have used up their ingredients, so their output counts toward
+// quests until it's collected. The relay's rows are used when it's live (by recipe; a recipe the page doesn't
+// know yet triggers a reload), else BitJita's list.
+function pendingOutputs() {
+  const info = new Map(S.pendingCrafts.map(c => [c.key, c]));
+  const rows = L.ready
+    ? [...L.crafts.values(), ...L.passive.values()].map(r => ({ ...info.get(r.key), ...r }))
+    : S.pendingCrafts;
+  const out = {};
+  for (const r of rows) {
+    const recipe = S.craftRecipes[r.recipe_id];
+    if (!recipe) continue;
+    const where = [r.building || recipe.building, r.claim].filter(Boolean).join(', ') || 'a crafting station';
+    for (const o of recipe.outputs) {
+      const units = o.qty * (r.count || 1);
+      const list  = out[o.id] ||= [];
+      const same  = list.find(x => x.where === where && x.done === !!r.done);
+      if (same) same.units += units;
+      else list.push({ units, label: r.building || recipe.building || 'a station', where, done: !!r.done });
+    }
+  }
+  for (const list of Object.values(out)) {
+    for (const x of list) x.tip = `${x.units.toLocaleString()} ${x.done ? 'done, waiting to be collected' : 'still crafting'} at ${x.where}`;
+  }
+  return out;
+}
+
+// Take up to `left` units of an item from the player's crafts in progress into `into`; returns what's still left
+function takeCrafting(id, left, into, held) {
+  for (const c of (S._pending || {})[id] || []) {
+    if (left <= 0) break;
+    const units = claim(`craft:${id}:${c.where}:${c.done}`, c.units, left, held);
+    if (units <= 0) continue;
+    into.push({ ...c, units });
+    left -= units;
+  }
+  return left;
 }
 
 function questVerdict(q) {
@@ -1026,17 +1140,36 @@ function questVerdict(q) {
   if (q._plans.some(p => p.craft?.ok)) return 'craft';
   if (q._plans.some(p => p.trades.length)) return 'barter';
   if (q._plans.some(p => p.buys.length)) return 'buy';
+  if (q._plans.some(p => p.crafting.length)) return 'pending';
   if (q._plans.some(p => p.housing.length)) return 'housing';
   return 'ready';
 }
 
+// Some of this item went to other quests: "used for Hoarders"
+let AQ_CARD = '';   // the quest whose card is being drawn
+
+function heldTag(by) {
+  const others = [...by].filter(x => x !== AQ_CARD);
+  if (!others.length) {
+    return `<span class="aq-tag aq-tag-held" data-tip="${esc('Some of this goes into crafts for another item this quest needs, so less is left for this one.')}">` +
+      `used in this quest's crafts</span>`;
+  }
+  const tip = `Some of what you have, are crafting or can buy of this is counted for ${others.join(', ')}` +
+              `${by.has(AQ_CARD) ? ' and for crafts in this quest' : ''}.\n` +
+              'Each item counts for one quest only: quests that can be finished get theirs first.';
+  return `<span class="aq-tag aq-tag-held" data-tip="${esc(tip)}">used for ${esc(others.length === 1 ? others[0] : `${others.length} quests`)}</span>`;
+}
+
 function aqNeedHtml(n, p, sharedBy) {
-  const got  = p.own + p.housing.reduce((s, h) => s + h.units, 0);
+  const got  = p.own + p.crafting.reduce((s, c) => s + c.units, 0) + p.housing.reduce((s, h) => s + h.units, 0);
   const cls  = p.short ? (got ? 'stock-part-t' : 'stock-none-t') : 'stock-ok-t';
   const tags = [];
   if (p.own) {
     const where = [...(n.where || [])].sort((a, b) => b.qty - a.qty).map(l => `${l.qty.toLocaleString()} in ${l.label}`).join('\n');
     tags.push(`<span class="aq-tag aq-tag-have" data-tip="${esc(where || 'In your inventory')}">have ${p.own.toLocaleString()}</span>`);
+  }
+  for (const c of p.crafting) {
+    tags.push(`<span class="aq-tag aq-tag-crafting" data-tip="${esc(c.tip)}">${c.units.toLocaleString()} ${c.done ? 'ready at' : 'crafting at'} ${esc(c.label)}</span>`);
   }
   for (const h of p.housing) {
     tags.push(`<span class="aq-tag aq-tag-house" data-tip="${esc(`${h.units.toLocaleString()} in ${h.who}'s house${h.where ? ` (${h.where})` : ''}`)}">` +
@@ -1062,13 +1195,17 @@ function aqNeedHtml(n, p, sharedBy) {
     const why = n.id === HEX_COIN_ID ? 'Hex Coin has to be earned' : 'Not for sale on your region\'s market or at the stalls in market range';
     tags.push(`<span class="aq-tag aq-tag-short" data-tip="${esc(why)}">${p.short.toLocaleString()} missing</span>`);
   }
+  if (p.heldBy.size) tags.push(heldTag(p.heldBy));
   if (p.craft) {
     const c = p.craft;
     tags.push(`<span class="aq-tag ${c.ok ? 'aq-tag-craft-ok' : 'aq-tag-craft'}" data-tip="${esc(`${c.crafts.toLocaleString()}× ${c.recipe} at ${c.building}`)}">` +
       `craft ${c.makes.toLocaleString()}${c.cost ? ` for ${HEX}${c.cost.toLocaleString()}` : ''}</span>`);
   }
-  const shared = sharedBy.length ? ` <span class="aq-keep" data-tip="${esc(`Also needed by: ${sharedBy.join(', ')}\nEach quest is checked on its own, so the same items count for each.`)}">shared</span>` : '';
-  const kept   = n.consumed ? '' : ` <span class="aq-keep" data-tip="Only has to be in your inventory; the quest doesn't take it">kept</span>`;
+  const shared = sharedBy.length && !p.heldBy.size
+    ? ` <span class="aq-keep" data-tip="${esc(`Also needed by: ${sharedBy.join(', ')}\nEach item counts for one quest only, and there's enough for this one.`)}">shared</span>` : '';
+  const kept   = n.from_name
+    ? ` <span class="aq-keep" data-tip="${esc("This stage asks you to craft it. The quest data lists no items for it, so it's read from the stage's name.")}">craft for this stage</span>`
+    : n.consumed ? '' : ` <span class="aq-keep" data-tip="Only has to be in your inventory; the quest doesn't take it">kept</span>`;
   return `<div class="aq-need"><span class="aq-item">${esc(n.name)}${kept}${shared}</span>` +
     `<span class="aq-count ${cls}">${Math.min(got, n.qty).toLocaleString()}<span class="sub"> / ${n.qty.toLocaleString()}</span></span>` +
     `<span class="aq-src">${tags.join('')}</span>${p.craft ? aqRecipeHtml(p.craft) : ''}</div>`;
@@ -1080,13 +1217,16 @@ function aqRecipeHtml(c) {
     ? `<span class="sub">${esc(l.skill)} ${l.level} ✓</span>`
     : `<span class="aq-tag aq-tag-short">needs ${esc(l.skill)} ${l.level} (you have ${l.have})</span>`).join(' ');
   const rows = c.ings.map(i => {
-    const got  = i.own + i.housing.reduce((s, h) => s + h.units, 0);
+    const got  = i.own + i.crafting.reduce((s, c) => s + c.units, 0) + i.housing.reduce((s, h) => s + h.units, 0);
     const buy  = i.bought.picks.reduce((s, pk) => s + pk.units, 0);
     const cls  = i.short ? (got + buy ? 'stock-part-t' : 'stock-none-t') : 'stock-ok-t';
     const tags = [];
     if (i.own) {
       const where = [...i.where].sort((a, b) => b.qty - a.qty).map(l => `${l.qty.toLocaleString()} in ${l.label}`).join('\n');
       tags.push(`<span class="aq-tag aq-tag-have" data-tip="${esc(where || 'In your inventory')}">have ${i.own.toLocaleString()}</span>`);
+    }
+    for (const c of i.crafting) {
+      tags.push(`<span class="aq-tag aq-tag-crafting" data-tip="${esc(c.tip)}">${c.units.toLocaleString()} ${c.done ? 'ready at' : 'crafting at'} ${esc(c.label)}</span>`);
     }
     for (const h of i.housing) {
       tags.push(`<span class="aq-tag aq-tag-house" data-tip="${esc(`${h.units.toLocaleString()} in ${h.who}'s house${h.where ? ` (${h.where})` : ''}`)}">` +
@@ -1099,6 +1239,7 @@ function aqRecipeHtml(c) {
         `${i.bought.picks.some(pk => pk.stand) ? STAND_MARK : ''}</span>`);
     }
     if (i.short) tags.push(`<span class="aq-tag aq-tag-short" data-tip="Not for sale on your region's market">${i.short.toLocaleString()} missing</span>`);
+    if (i.heldBy.size) tags.push(heldTag(i.heldBy));
     if (i.craft) {
       tags.push(`<span class="aq-tag ${i.craft.ok ? 'aq-tag-craft-ok' : 'aq-tag-craft'}">craft ${i.craft.makes.toLocaleString()}` +
         `${i.craft.cost ? ` for ${HEX}${i.craft.cost.toLocaleString()}` : ''}</span>`);
@@ -1174,23 +1315,36 @@ function renderActiveQuests(stallMap = buildStallMap()) {
     renderTabCounts();
     return;
   }
+  S._pending = pendingOutputs();   // read once per render by takeCrafting
   const users = {};   // item id → names of the quests needing it
   for (const q of S.activeQuests) for (const n of q.needs) (users[n.id] ||= []).push(q.name);
-  for (const q of S.activeQuests) {
-    q._plans   = q.needs.map(n => questNeedPlan(n, stallMap));
+  // Each quest on its own first, to see which can be finished; then again in that order with shared stock, so
+  // an item, a craft or a market listing counts for one quest only: quests that can be finished take theirs
+  // first (tracked ones, then the cheaper ones, first among equals) and the rest get what's left
+  const planAll = q => {
+    CLAIM = { quest: q.name, keep: false, dry: false };
+    q._plans = q.needs.map(n => { CLAIM.keep = !n.consumed; return questNeedPlan(n, stallMap); });
     q._verdict = questVerdict(q);
-  }
+  };
+  LEDGER = null;
+  S.activeQuests.forEach(planAll);
+  const cost  = q => q._plans.reduce((s, p) => s + p.cost, 0);
+  const order = [...S.activeQuests].filter(q => !q.stale)
+    .sort((a, b) => AQ_RANK[a._verdict] - AQ_RANK[b._verdict] || (b.tracked - a.tracked) || cost(a) - cost(b));
+  LEDGER = new Map();
+  order.forEach(planAll);
+  LEDGER = CLAIM = null;
   const counts = Object.fromEntries(AQ_FILTERS.map(([k, , f]) => [k, S.activeQuests.filter(f).length]));
   if (!counts[S.aqFilter]) S.aqFilter = 'all';
   const show = S.activeQuests.filter(AQ_FILTERS.find(([k]) => k === S.aqFilter)[2])
     .sort((a, b) => AQ_RANK[a._verdict] - AQ_RANK[b._verdict] || (b.tracked - a.tracked) || a.name.localeCompare(b.name));
 
   const range  = Math.max(S.marketRangeH, STAND_CLAIM_RADIUS_H);
-  const claim  = S.allClaims.find(c => c.id === S.selectedClaimId)?.name;
+  const claimName = S.allClaims.find(c => c.id === S.selectedClaimId)?.name;
   const houses = S.housedPlayers.length ? `, ${S.housedPlayers.length} added player house${S.housedPlayers.length === 1 ? '' : 's'}` : '';
   const help = 'Checks the current stage of each quest you have started.\n' +
-    `Items come from your inventories, banks and house first${houses ? ', then the player housing you added' : ''},\n` +
-    `then the cheapest coin offers on the ${S.questRegion || 'region'} market and at stalls and Trader Stands within ${range}h of ${claim || 'you'},\n` +
+    `Items come from your inventories, banks and house first, then what your crafts in progress will make${houses ? ',\nthen the player housing you added' : ''},\n` +
+    `then the cheapest coin offers on the ${S.questRegion || 'region'} market and at stalls and Trader Stands within ${range}h of ${claimName || 'you'},\n` +
     'then barter trades at those stalls. Anything still missing is crafted when you have the levels and every\n' +
     "ingredient can be had from your storage, added housing or the region's market (stalls included).\n" +
     'Move the market range slider to look further for stalls.';
@@ -1206,7 +1360,8 @@ function renderActiveQuests(stallMap = buildStallMap()) {
       const cost  = !total ? '' : q._verdict === 'short'
         ? ` <span class="sub" style="text-transform:none;font-weight:400">· ${HEX}${total.toLocaleString()} buys what's for sale</span>`
         : ` <span class="quest-cost">${HEX}${total.toLocaleString()}</span>`;
-      const extra = q.needs.length && q.other ? ` <span class="sub">+ ${q.other} step${q.other === 1 ? '' : 's'} in game</span>` : '';
+      const extra = q.needs.length && q.other > 0 ? ` <span class="sub">+ ${q.other} step${q.other === 1 ? '' : 's'} in game</span>` : '';
+      AQ_CARD = q.name;
       const needs = q.stale ? '' : q.needs.map((n, i) => aqNeedHtml(n, q._plans[i], [...new Set(users[n.id].filter(x => x !== q.name))])).join('');
       const track = q.tracked ? `<span class="aq-track" data-tip="Tracked in game">★</span>` : '';
       return `<div class="aq-card aq-${q._verdict}">` +
@@ -1744,7 +1899,7 @@ const liveEl          = $('live-status');
 const L = {
   ws: null, key: null, ready: false, relay: 0, fails: 0,
   tasks: new Map(), credits: new Map(), bags: new Map(), positions: new Map(), orders: new Map(), quests: new Map(),
-  questReloadTries: 0, sentStands: [], liveStands: new Set(), requestId: 0, dirty: false, creditsDirty: false,
+  crafts: new Map(), passive: new Map(), questReloadTries: 0, craftReloadTries: 0, sentStands: [], liveStands: new Set(), requestId: 0, dirty: false, creditsDirty: false,
   retryTimer: null, reloadTimer: null, renderTimer: null, stallsTimer: null, reloadTries: 0, reloading: false,
 };
 
@@ -1859,6 +2014,17 @@ const LIVE_TABLES = {
     map:  'positions', read: v => ({ key: String(v[0]), x: Number(v[3]) / 1000, z: Number(v[4]) / 1000 }),
   },
   // a stand's trades: only followed for changes, which reload /api/stalls for names and prices
+  // the player's crafts at stations: what they're making and how many
+  progressive_action_state: {
+    cols: ['entity_id', 'building_entity_id', 'function_type', 'progress', 'recipe_id', 'craft_count',
+           'last_crafted_action_id', 'owner_entity_id', 'lock_expiration', 'preparation'],
+    map:  'crafts',  read: v => ({ key: String(v[0]), recipe_id: String(v[4]), count: Number(v[5]) || 1 }),
+  },
+  // passive crafts (refining, tanning...): running, or done and waiting to be collected (status 2)
+  passive_craft_state: {
+    cols: ['entity_id', 'owner_entity_id', 'recipe_id', 'building_entity_id', 'timestamp', 'status', 'slot'],
+    map:  'passive', read: v => ({ key: String(v[0]), recipe_id: String(v[2]), count: 1, done: Array.isArray(v[5]) && v[5][0] === 2 }),
+  },
   // the player's quests: which stage each is on, finished, tracked
   quest_chain_state: {
     cols: ['entity_id', 'player_entity_id', 'quest_chain_desc_id', 'stage_id', 'completed', 'stage_rewards_awarded', 'tracked'],
@@ -1884,6 +2050,8 @@ function liveQueries() {
     `SELECT * FROM inventory_state WHERE owner_entity_id = ${playerId}`,          // pockets, toolbelt, wallet
     `SELECT * FROM inventory_state WHERE player_owner_entity_id = ${playerId}`,   // banks and stashes
     `SELECT * FROM quest_chain_state WHERE player_entity_id = ${playerId}`,
+    `SELECT * FROM progressive_action_state WHERE owner_entity_id = ${playerId}`,
+    `SELECT * FROM passive_craft_state WHERE owner_entity_id = ${playerId}`,
   ];
   for (const id of L.sentStands) {
     q.push(`SELECT * FROM mobile_entity_state WHERE entity_id = ${id}`,
@@ -1924,6 +2092,7 @@ function liveMessage(ws, raw) {
   if (!initial && !update) return;
   if (initial) {
     Object.assign(L, { tasks: new Map(), credits: new Map(), bags: new Map(), positions: new Map(), orders: new Map(), quests: new Map(),
+                       crafts: new Map(), passive: new Map(),
                        ready: true, fails: 0, liveStands: new Set(L.sentStands) });
     ws.gotData = true;
     liveSetStatus('live');
@@ -1944,6 +2113,7 @@ function liveMessage(ws, raw) {
   if (initial || changed.has('bags'))    liveApplyInventory();
   if (initial || changed.has('tasks'))   liveReconcile(!initial);
   if (initial || changed.has('quests'))  liveApplyQuests(!initial);
+  if (initial || changed.has('crafts') || changed.has('passive')) liveApplyCrafts(!initial);
   if (initial || changed.has('positions') || changed.has('bags')) liveApplyStands();
   if (!initial && changed.has('orders')) liveScheduleStallsReload();
   liveRenderSoon();
@@ -2087,6 +2257,19 @@ function liveApplyInventory() {
 // Quests: drop the ones the relay says are finished, follow tracking, and reload when a quest has moved to a
 // stage BitJita hasn't shown yet (its items come from BitJita) or one was started. changed = the relay just
 // reported a quest change; otherwise a few spaced-out retries while BitJita catches up.
+// Crafts started, finished or collected: re-render; a craft whose recipe the page hasn't seen yet needs
+// /api/tasks for what it makes (BitJita can lag, so a few spaced-out retries)
+function liveApplyCrafts(changed) {
+  if (!L.ready || !S.tasksLoaded) return;
+  L.dirty = true;
+  const unknown = [...L.crafts.values(), ...L.passive.values()].some(r => !S.craftRecipes[r.recipe_id]);
+  if (changed) L.craftReloadTries = 0;
+  if (unknown) {
+    if (changed) liveScheduleReload(LIVE_RELOAD_MS);
+    else if (L.craftReloadTries < LIVE_RETRY_MS.length) liveScheduleReload(LIVE_RETRY_MS[L.craftReloadTries++]);
+  }
+}
+
 function liveApplyQuests(changed) {
   if (!L.ready || !S.tasksLoaded || !L.quests.size) return;
   const before = S.activeQuests.length;

@@ -17,7 +17,8 @@ Returns:
     per_craft = units one craft makes; per = how many of the ingredient one craft uses
     an ingredient that isn't for sale has its own craft (same shape), up to CRAFT_DEPTH levels deep
     where = [{qty, label, container, place, elsewhere}]: the player's containers holding the ingredient
-  - offers: {id: [{claim, region, x, z, price, bundle, units, source, seller, stand}]}: every offer within
+  - offers: {id: [{claim, region, x, z, price, bundle, units, source, seller, stand}]}: for the items and the
+    crafting ingredients priced, every offer within
     ROUTE_RADIUS of the player in any region, for planning a shopping route (price is per bundle)
   - region: region name
 """
@@ -176,7 +177,7 @@ def slim_recipe(r):
         'name':              r.get('name', ''),
         'buildingName':      r.get('buildingName', ''),
         'outputQuantity':    r.get('outputQuantity'),
-        'craftedItems':      [{'id': o.get('id'), 'quantity': o.get('quantity')} for o in r.get('craftedItems') or []],
+        'craftedItems':      [{'id': o.get('id'), 'quantity': o.get('quantity'), 'name': o.get('name')} for o in r.get('craftedItems') or []],
         'consumedItems':     [{'id': c.get('id'), 'quantity': c.get('quantity'), 'itemType': c.get('itemType'),
                                'name': c.get('name')} for c in r.get('consumedItems') or []],
         'levelRequirements': [{'skill_id': l.get('skill_id'), 'level': l.get('level'),
@@ -202,7 +203,20 @@ def recipe_detail(key):
     return _fetched_recipes[k]
 
 
-def craft_plan(key, units, detail, have, where, levels):
+def recipe_name(recipe, key, fallback=None):
+    """The recipe's name with the item filled in: the game's names are templates like "Craft {0}" (some
+    sources leave just "Craft"), so "Craft {0}" for Simple Timber reads "Craft Simple Timber"."""
+    name = recipe.get('name') or ''
+    item = next((o.get('name') for o in recipe.get('craftedItems') or [] if str(o.get('id')) == key[0] and o.get('name')), None) \
+        or fallback
+    if not item:
+        return name.replace('{0}', '').replace('{1}', '').strip()
+    if '{0}' in name or '{1}' in name:
+        return name.replace('{0}', item).replace('{1}', item)
+    return name if item.lower() in name.lower() or len(name.split()) > 1 else f'{name} {item}'.strip()
+
+
+def craft_plan(key, units, detail, have, where, levels, name=None):
     """How to craft `units` of an item: its recipe and the ingredients still needed. None without a recipe."""
     recipe = pick_recipe(detail)
     if not recipe:
@@ -218,7 +232,7 @@ def craft_plan(key, units, detail, have, where, levels):
         ingredients.append({'id': iid, 'type': 'cargo' if c.get('itemType') == 1 else 'item', 'name': c.get('name') or iid,
                             'per': c.get('quantity') or 1, 'qty': qty, 'have': got, 'buy': max(0, qty - got), 'where': where.get(iid, []) if got else []})
     return {
-        'recipe':      recipe.get('name', ''),
+        'recipe':      recipe_name(recipe, key, name),
         'building':    recipe.get('buildingName', ''),
         'crafts':      crafts,
         'makes':       units,
@@ -386,11 +400,12 @@ class handler(BaseHTTPRequestHandler):
                     details.update(zip(todo, pool.map(recipe_detail, todo)))
                 plans = []
                 for k, holder, above in pending:
-                    p = craft_plan(k, holder['short'], details.get(k), have, where, levels)
+                    p = craft_plan(k, holder['short'], details.get(k), have, where, levels, holder.get('name'))
                     if p:
                         holder['craft'] = p
                         plans.append((p, above))
-                extra = {(i['id'], i['type']) for p, _ in plans for i in p['ingredients'] if i['buy']} - priced
+                # every ingredient, even ones the player has enough of: quests that share them may run short
+                extra = {(i['id'], i['type']) for p, _ in plans for i in p['ingredients']} - priced
                 if extra:
                     with ThreadPoolExecutor(max_workers=10) as pool:
                         add_markets(market(pool, extra))
@@ -408,7 +423,7 @@ class handler(BaseHTTPRequestHandler):
             self._send(200, {
                 'items':    items,
                 'offers':   {k[0]: [{f: s[f] for f in route_fields} for s in src.by_key.get(k, [])
-                                    if s['dist'] is not None and s['dist'] <= ROUTE_RADIUS] for k in need},
+                                    if s['dist'] is not None and s['dist'] <= ROUTE_RADIUS] for k in priced},
                 'region':   src.region,
                 'warnings': warnings,
             })

@@ -26,8 +26,9 @@ from collections import defaultdict
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'api'))
 
-from _lib import api_get                                                                  # noqa: E402
+from _lib import api_get, build_name_maps                                                 # noqa: E402
 from quest_prices import CRAFT_DEPTH, detail_path, pick_recipe, slim_recipe               # noqa: E402
+from tasks import craft_stage_item, name_index                                            # noqa: E402
 
 OUT        = os.path.join(ROOT, 'api', 'quest_recipes.json')
 EFFORT_DIR = os.path.join(ROOT, '..', 'Bitcraft Effort')
@@ -40,7 +41,11 @@ SKILL_NAMES = {
 
 
 def quest_items():
-    """(id, type) of every item any quest stage asks for."""
+    """(id, type) of every item any quest stage asks for, including the items stages like "Craft Reinforced
+    Skiff Hull" name (they have no conditions; /api/tasks reads the item from the name the same way)."""
+    items  = api_get('/api/items')
+    cargo  = api_get('/api/cargo')
+    index  = name_index(*build_name_maps(items.get('items', items), cargo.get('cargos', cargo)))
     first  = api_get('/api/quests', {'limit': 100, 'page': 1})
     quests = list(first.get('quests', []))
     for page in range(2, (first.get('totalPages') or 1) + 1):
@@ -51,6 +56,10 @@ def quest_items():
             for c in stage.get('completionConditions') or []:
                 if c.get('type') == 'ItemStack' and str(c.get('item_id')) != '1':   # Hex Coin isn't crafted
                     keys.add((str(c.get('item_id')), 'cargo' if str(c.get('item_type', '')).lower() == 'cargo' else 'item'))
+            if not stage.get('completionConditions'):
+                made = craft_stage_item(stage.get('name') or '', index)
+                if made:
+                    keys.add(made)
     return len(quests), keys
 
 

@@ -9,7 +9,8 @@ Returns all incomplete traveler tasks for a player, enriched with:
   nearest the player (x, z)
 - Skill level requirement per task
 Plus per-traveler weekly task credits, the reroll cost, the quests that unlock more task tiers, every
-quest the player has active (with what its current stage asks for), and
+quest the player has active (with what its current stage asks for), the player's crafts in progress (what
+they'll make: it counts toward quests until collected), and
 each traveler's task pool (every task they can hand the player, for the weekly stock estimate).
 Optional: username=Name (needed to check quest level requirements), region_id=R (the player's region,
 for market prices; storage elsewhere is labelled with its region).
@@ -163,15 +164,52 @@ def build_quests(catalog, player_quests, levels, inv_map, inv_detail, items_map,
     return shown
 
 
+CRAFT_VERBS = ('craft', 'make', 'cook', 'brew', 'forge', 'build', 'construct', 'smelt', 'refine')
+
+
+def name_index(items_map, cargo_map):
+    """{lowercased name: (id, type)} for every item and cargo, to find the item a stage names."""
+    index = {}
+    for typ, names in (('cargo', cargo_map), ('item', items_map)):   # items win a name both have
+        for iid, name in names.items():
+            if name:
+                index[name.lower()] = (iid, typ)
+    return index
+
+
+def craft_stage_item(stage_name, index):
+    """
+    The item a "Craft Reinforced Skiff Hull - First Skiff Upgrade" stage asks the player to make, as (id, type),
+    or None. Stages like this come with no conditions in the quest data (the game checks the craft itself), so
+    the item is read from the name, and only when the words after the verb are exactly an item's name.
+    """
+    base  = stage_name.split(' - ')[0].strip()
+    if base.lower().endswith(' dialogue'):
+        return None
+    if base.lower().endswith(' quest'):
+        base = base[:-len(' quest')]
+    words = base.split()
+    if len(words) < 2 or words[0].lower() not in CRAFT_VERBS:
+        return None
+    rest = ' '.join(w for w in words[1:] if w.lower() not in ('a', 'an', 'the')).lower()
+    for name in (rest, rest[:-1] if rest.endswith('s') else None, rest[:-2] if rest.endswith('es') else None):
+        if name and name in index:
+            return index[name]
+    return None
+
+
 def build_active_quests(my_quests, inv_map, inv_detail, items_map, cargo_map):
     """
     Every quest the player has started and not finished, with what its current stage asks for.
     Returns [{id, name, stage_id, stage, stage_index, total_stages, tracked, needs, other, rewards}].
-    needs = [{id, type, name, qty, have, where, consumed}] for the stage's item conditions;
+    needs = [{id, type, name, qty, have, where, consumed, from_name}] for the stage's item conditions;
+            from_name = a stage with no conditions that names an item to craft ("Craft Reinforced Skiff Hull"):
+            1 of that item, read from the stage name
     other = how many of the stage's conditions aren't items (go somewhere, learn something: done in game).
     """
     names  = {str(k): v.get('name') for k, v in (my_quests.get('items') or {}).items() if isinstance(v, dict)}
     skills = {str(k): v for k, v in (my_quests.get('skills') or {}).items()}
+    index  = name_index(items_map, cargo_map)
 
     def name_of(iid, cargo):
         return (cargo_map.get(iid) if cargo else items_map.get(iid)) or names.get(iid) or iid
@@ -190,6 +228,13 @@ def build_active_quests(my_quests, inv_map, inv_detail, items_map, cargo_map):
             needs.append({'id': iid, 'type': 'cargo' if cargo else 'item', 'name': name_of(iid, cargo),
                           'qty': c.get('quantity', 1), 'have': inv_map.get(iid, 0), 'where': inv_detail.get(iid, []),
                           'consumed': bool(c.get('is_consumed', True))})
+        if not conds:
+            made = craft_stage_item(q.get('currentStageName') or '', index)
+            if made:
+                iid, typ = made
+                needs.append({'id': iid, 'type': typ, 'name': name_of(iid, typ == 'cargo'), 'qty': 1,
+                              'have': inv_map.get(iid, 0), 'where': inv_detail.get(iid, []), 'consumed': False,
+                              'from_name': True})
         rewards = []
         for r in (q.get('rewards') or []) + (q.get('implicitRewards') or []):
             if r.get('type') == 'Experience':
@@ -208,11 +253,78 @@ def build_active_quests(my_quests, inv_map, inv_detail, items_map, cargo_map):
             'total_stages': q.get('totalStages') or len(q.get('stages') or []),
             'tracked':      bool(q.get('tracked')),
             'needs':        needs,
-            'other':        len(conds) - len(needs),
+            'other':        sum(1 for c in conds if c.get('type') != 'ItemStack'),
             'rewards':      rewards,
         })
     out.sort(key=lambda q: (not q['tracked'], q['name'].lower()))
     return out
+
+
+_output_of = {}   # "... Output" item id -> (item id, type, name) it becomes when collected, per warm instance
+
+
+def collected_as(iid, name):
+    """What a passive craft's output item turns into when it's collected: a "Sturdy Tanned Pelt Output" is
+    a roll on a list that almost always gives a Sturdy Tanned Pelt. Other items are themselves."""
+    if not name.endswith(' Output'):
+        return None
+    if iid not in _output_of:
+        try:
+            rolls = api_get(f'/api/items/{iid}').get('itemListPossibilities') or []
+        except Exception:
+            return None
+        odds = {}
+        for r in rolls:
+            t = r.get('targetItem') or {}
+            k = (str(r.get('targetId')), 'cargo' if r.get('isCargo') else 'item', t.get('name') or '')
+            odds[k] = odds.get(k, 0) + (r.get('chance') or 0)
+        _output_of[iid] = max(odds, key=odds.get) if odds else None
+    return _output_of[iid]
+
+
+def build_pending_crafts(crafts, passive, items_map, cargo_map):
+    """
+    What the player's crafts will hand them: crafts in progress at stations and passive crafts (refining,
+    tanning...) that are running or waiting to be collected. Their ingredients are already used up, so the
+    output counts toward quests until it's collected into storage.
+    Returns (crafts, recipes):
+      crafts  = [{key, kind: 'craft' | 'passive', recipe_id, count, building, claim, done}]
+      recipes = {recipe_id: {building, outputs: [{id, type, name, qty}]}}: what one craft makes, so the page
+                can read crafts the relay reports by their recipe
+    """
+    listed = {(str(i.get('id')), typ): i.get('name') for resp in (crafts, passive)
+              for field, typ in (('items', 'item'), ('cargos', 'cargo')) for i in (resp or {}).get(field) or []}
+
+    def name_of(iid, typ):
+        return (cargo_map.get(iid) if typ == 'cargo' else items_map.get(iid)) or listed.get((iid, typ)) or iid
+
+    def outputs(row):
+        out = []
+        for c in row.get('craftedItem') or []:
+            iid, typ = str(c.get('item_id')), 'cargo' if str(c.get('item_type', '')).lower() == 'cargo' else 'item'
+            name = name_of(iid, typ)
+            real = collected_as(iid, name) if typ == 'item' else None
+            if real:
+                iid, typ, name = real[0], real[1], real[2] or name_of(real[0], real[1])
+            out.append({'id': iid, 'type': typ, 'name': name, 'qty': c.get('quantity') or 1})
+        return out
+
+    pending, recipes = [], {}
+    for kind, rows in (('craft', (crafts or {}).get('craftResults') or []), ('passive', (passive or {}).get('craftResults') or [])):
+        for row in rows:
+            rid = str(row.get('recipeId'))
+            if rid not in recipes:
+                recipes[rid] = {'building': row.get('buildingName') or '', 'outputs': outputs(row)}
+            pending.append({
+                'key':       str(row.get('entityId')),
+                'kind':      kind,
+                'recipe_id': rid,
+                'count':     row.get('craftCount') or 1 if kind == 'craft' else 1,
+                'building':  row.get('buildingName') or '',
+                'claim':     row.get('claimName') or '',
+                'done':      row.get('completed') if kind == 'craft' else row.get('status') == 'complete',
+            })
+    return pending, recipes
 
 
 def build_credits(tasks_data):
@@ -389,6 +501,8 @@ class handler(BaseHTTPRequestHandler):
                 'levels':  'skill levels',
                 'regions': 'region names',
                 'catalog': 'task catalog',
+                'crafts':  'crafts in progress',
+                'passive': 'passive crafts',
             }
             with ThreadPoolExecutor(max_workers=10) as pool:
                 futures = {
@@ -401,6 +515,8 @@ class handler(BaseHTTPRequestHandler):
                     pool.submit(api_get, f'/api/players/{player_id}/quests'):         'my_quests',
                     pool.submit(api_get, '/api/regions'):                             'regions',
                     pool.submit(pages, '/api/traveler-tasks', 'tasks'):               'catalog',
+                    pool.submit(api_get, f'/api/players/{player_id}/crafts'):         'crafts',
+                    pool.submit(api_get, f'/api/players/{player_id}/passive-crafts'): 'passive',
                 }
                 if username:
                     futures[pool.submit(get_skill_levels, username, player_id)] = 'levels'
@@ -409,7 +525,7 @@ class handler(BaseHTTPRequestHandler):
                     try:
                         results[key] = f.result()
                     except Exception:
-                        results[key] = {} if key in ('tasks', 'inv', 'my_quests', 'levels') else ([], {}) if key == 'catalog' else []
+                        results[key] = {} if key in ('tasks', 'inv', 'my_quests', 'levels', 'crafts', 'passive') else ([], {}) if key == 'catalog' else []
                         warnings.append(f'Could not load {_warn_names.get(key, key)} from BitJita')
 
             tasks_data   = results.get('tasks', {})
@@ -439,6 +555,8 @@ class handler(BaseHTTPRequestHandler):
                 'quests':      build_quests(results.get('quests') or [], (results.get('my_quests') or {}).get('quests', []),
                                             results.get('levels') or {}, inv_map, inv_detail, items_map, cargo_map),
                 'active_quests': build_active_quests(results.get('my_quests') or {}, inv_map, inv_detail, items_map, cargo_map),
+                **dict(zip(('pending_crafts', 'craft_recipes'),
+                           build_pending_crafts(results.get('crafts'), results.get('passive'), items_map, cargo_map))),
                 'pool':       build_pool(*results.get('catalog') or ([], {}), tasks_data, results.get('quests') or [],
                                           (results.get('my_quests') or {}).get('quests', []), results.get('levels') or {},
                                           inv_map, items_map, cargo_map),
