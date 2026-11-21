@@ -8,7 +8,8 @@ Returns all incomplete traveler tasks for a player, enriched with:
 - Market price in the player's region (every market in a region shares its listings), at the market
   nearest the player (x, z)
 - Skill level requirement per task
-Plus per-traveler weekly task credits, the reroll cost, the quests that unlock more task tiers, and
+Plus per-traveler weekly task credits, the reroll cost, the quests that unlock more task tiers, every
+quest the player has active (with what its current stage asks for), and
 each traveler's task pool (every task they can hand the player, for the weekly stock estimate).
 Optional: username=Name (needed to check quest level requirements), region_id=R (the player's region,
 for market prices; storage elsewhere is labelled with its region).
@@ -160,6 +161,58 @@ def build_quests(catalog, player_quests, levels, inv_map, inv_detail, items_map,
         for k in ('_id', '_low', '_prev', '_level'):
             del f[k]
     return shown
+
+
+def build_active_quests(my_quests, inv_map, inv_detail, items_map, cargo_map):
+    """
+    Every quest the player has started and not finished, with what its current stage asks for.
+    Returns [{id, name, stage_id, stage, stage_index, total_stages, tracked, needs, other, rewards}].
+    needs = [{id, type, name, qty, have, where, consumed}] for the stage's item conditions;
+    other = how many of the stage's conditions aren't items (go somewhere, learn something: done in game).
+    """
+    names  = {str(k): v.get('name') for k, v in (my_quests.get('items') or {}).items() if isinstance(v, dict)}
+    skills = {str(k): v for k, v in (my_quests.get('skills') or {}).items()}
+
+    def name_of(iid, cargo):
+        return (cargo_map.get(iid) if cargo else items_map.get(iid)) or names.get(iid) or iid
+
+    out = []
+    for q in my_quests.get('quests') or []:
+        if q.get('completed'):
+            continue
+        conds = q.get('currentStageConditions') or []
+        needs = []
+        for c in conds:
+            if c.get('type') != 'ItemStack':
+                continue
+            iid   = str(c.get('item_id'))
+            cargo = str(c.get('item_type', '')).lower() == 'cargo'
+            needs.append({'id': iid, 'type': 'cargo' if cargo else 'item', 'name': name_of(iid, cargo),
+                          'qty': c.get('quantity', 1), 'have': inv_map.get(iid, 0), 'where': inv_detail.get(iid, []),
+                          'consumed': bool(c.get('is_consumed', True))})
+        rewards = []
+        for r in (q.get('rewards') or []) + (q.get('implicitRewards') or []):
+            if r.get('type') == 'Experience':
+                rewards.append(f"{r.get('quantity', 0):,} {skills.get(str(r.get('skill_id'))) or 'skill'} XP")
+            elif r.get('type') == 'ItemStack':
+                iid = str(r.get('item_id'))
+                qty = r.get('quantity', 1)
+                rewards.append(f"{qty}× {name_of(iid, str(r.get('item_type', '')).lower() == 'cargo')}" if qty != 1
+                               else name_of(iid, str(r.get('item_type', '')).lower() == 'cargo'))
+        out.append({
+            'id':           q.get('questChainDescId'),
+            'name':         q.get('questName') or '',
+            'stage_id':     str(q.get('stageId') or ''),   # the relay's quest_chain_state.stage_id, to spot a stage moving on
+            'stage':        q.get('currentStageName') or '',
+            'stage_index':  q.get('currentStageIndex') or 0,
+            'total_stages': q.get('totalStages') or len(q.get('stages') or []),
+            'tracked':      bool(q.get('tracked')),
+            'needs':        needs,
+            'other':        len(conds) - len(needs),
+            'rewards':      rewards,
+        })
+    out.sort(key=lambda q: (not q['tracked'], q['name'].lower()))
+    return out
 
 
 def build_credits(tasks_data):
@@ -385,7 +438,8 @@ class handler(BaseHTTPRequestHandler):
                                 for b in inv_data.get('inventories', []) if b.get('entityId')},
                 'quests':      build_quests(results.get('quests') or [], (results.get('my_quests') or {}).get('quests', []),
                                             results.get('levels') or {}, inv_map, inv_detail, items_map, cargo_map),
-                'pool':        build_pool(*results.get('catalog') or ([], {}), tasks_data, results.get('quests') or [],
+                'active_quests': build_active_quests(results.get('my_quests') or {}, inv_map, inv_detail, items_map, cargo_map),
+                'pool':       build_pool(*results.get('catalog') or ([], {}), tasks_data, results.get('quests') or [],
                                           (results.get('my_quests') or {}).get('quests', []), results.get('levels') or {},
                                           inv_map, items_map, cargo_map),
                 'warnings':    warnings,

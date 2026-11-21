@@ -235,6 +235,66 @@
     .quest-locked                    { opacity: .55; }
     .quest-next .quest-status        { color: #6ab0ff; }
     .quest-locked .quest-status      { color: #666688; }
+    /* ── Tabs ── */
+    #tabs { display: none; gap: 2px; padding: 10px 20px 0; border-bottom: 1px solid #2a2a5a; }
+    #tabs.visible { display: flex; }
+    .tab-btn {
+      padding: 7px 18px; border: 1px solid #1a1a3a; border-bottom: none; border-radius: 6px 6px 0 0;
+      background: #0b0b1a; color: #666688; cursor: pointer; margin-bottom: -1px;
+      font-size: .75rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
+    }
+    .tab-btn:hover { color: #c8c8dc; }
+    .tab-btn.active { background: #07070f; color: #f0a500; border-color: #2a2a5a; border-bottom: 1px solid #07070f; }
+    .tab-count { color: #444466; font-weight: 700; margin-left: 4px; }
+    .tab-btn.active .tab-count { color: #b47cff; }
+    .tab-pane[hidden] { display: none; }
+    body.tab-quests .tasks-only { display: none !important; }
+
+    /* ── Active quests ── */
+    #active-quests-section { padding: 8px 20px; font-size: .75rem; }
+    #active-quests-section:empty { display: none; }
+    #active-quests-section .exp-label { display: block; margin-bottom: 4px; }
+    .aq-summary   { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .aq-filter    { background: #0f0f28; border: 1px solid #2a2a5a; border-radius: 12px; padding: 3px 10px; font-size: .72rem;
+                    color: #c8c8dc; cursor: pointer; display: inline-flex; gap: 6px; }
+    .aq-filter.active { border-color: #f0a500; color: #f0a500; }
+    .aq-filter b  { font-weight: 800; }
+    .aq-list      { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 8px; }
+    .aq-card      { background: #0b0b1a; border: 1px solid #1a1a3a; border-left: 3px solid #2a2a5a; border-radius: 6px; padding: 7px 10px 8px; min-width: 0; }
+    .aq-card.aq-ready   { border-left-color: #52c46a; }
+    .aq-card.aq-housing { border-left-color: #5bc8e8; }
+    .aq-card.aq-buy     { border-left-color: #f0a500; }
+    .aq-card.aq-barter  { border-left-color: #b47cff; }
+    .aq-card.aq-short   { border-left-color: #e05050; }
+    .aq-card.aq-game    { border-left-color: #444466; }
+    .aq-card.aq-stale   { border-left-color: #3ddc5f; opacity: .7; }
+    .aq-stale .aq-verdict   { color: #3ddc5f; }
+    .aq-head      { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; }
+    .aq-name      { color: #f0a500; font-weight: 800; font-size: .8rem; }
+    .aq-track     { color: #f0a500; font-size: .7rem; cursor: default; }
+    .aq-stagen    { color: #444466; font-size: .65rem; margin-left: auto; white-space: nowrap; }
+    .aq-stage     { color: #8888aa; font-size: .7rem; margin: 1px 0 5px; }
+    .aq-verdict   { font-size: .65rem; font-weight: 800; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+    .aq-ready .aq-verdict   { color: #52c46a; }
+    .aq-housing .aq-verdict { color: #5bc8e8; }
+    .aq-buy .aq-verdict     { color: #f0a500; }
+    .aq-barter .aq-verdict  { color: #b47cff; }
+    .aq-short .aq-verdict   { color: #e05050; }
+    .aq-game .aq-verdict    { color: #666688; }
+    .aq-need      { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 2px 0; border-top: 1px solid #111128; }
+    .aq-item      { color: #c8c8dc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .aq-count     { font-weight: 700; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .aq-src       { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 2px 6px; font-size: .68rem; padding-left: 10px; }
+    .aq-tag       { border-radius: 3px; padding: 0 5px; cursor: default; border: 1px solid; }
+    .aq-tag-have  { color: #52c46a; border-color: #1f4a2a; }
+    .aq-tag-house { color: #5bc8e8; border-color: #1f3f4a; }
+    .aq-tag-buy   { color: #f0a500; border-color: #4a3a1a; }
+    .aq-tag-trade { color: #b47cff; border-color: #3a2a5a; }
+    .aq-tag-short { color: #e05050; border-color: #4a1f1f; }
+    .aq-tag-craft { color: #8888aa; border-color: #2a2a5a; }
+    .aq-keep      { color: #444466; font-size: .62rem; }
+    .aq-rewards   { color: #666688; font-size: .66rem; margin-top: 5px; }
+    .aq-rewards b { color: #b47cff; font-weight: 400; }
     .exp-label   { color: #666688; font-size: .75rem; margin-right: 4px; }
     .exp-chip    { background: #0f0f28; border: 1px solid #2a2a5a; border-radius: 12px; padding: 3px 10px; font-size: .75rem; display: inline-flex; gap: 6px; }
     .exp-skill   { color: #b47cff; }
@@ -374,29 +434,40 @@
   <datalist id="stall-owners-list"></datalist>
   <div id="tip-box"></div>
 
+  <div id="tabs" role="tablist">
+    <button type="button" class="tab-btn active" role="tab" data-tab="tasks">Tasks<span class="tab-count" id="tab-count-tasks"></span></button>
+    <button type="button" class="tab-btn" role="tab" data-tab="quests">Quests<span class="tab-count" id="tab-count-quests"></span></button>
+  </div>
+
   <div id="toolbar">
     <button id="btn-refresh">↺ Refresh</button>
-    <button id="btn-filter">☑ Completable only</button>
-    <button id="btn-csv">↓ CSV</button>
+    <button id="btn-filter" class="tasks-only">☑ Completable only</button>
+    <button id="btn-csv" class="tasks-only">↓ CSV</button>
     <span id="live-status"></span>
     <span id="status"></span>
   </div>
 
   <div id="api-warnings"></div>
-  <div id="credits-section"></div>
+  <div id="tab-tasks" class="tab-pane" role="tabpanel">
+    <div id="credits-section"></div>
 
-  <div id="tbl-wrap">
-    <div id="empty-msg"></div>
-    <table id="main-tbl" style="display:none">
-      <thead id="tbl-head"></thead>
-      <tbody id="tbl-body"></tbody>
-    </table>
+    <div id="tbl-wrap">
+      <div id="empty-msg"></div>
+      <table id="main-tbl" style="display:none">
+        <thead id="tbl-head"></thead>
+        <tbody id="tbl-body"></tbody>
+      </table>
+    </div>
+
+    <div id="stock-section"></div>
+    <div id="recommend-section"></div>
+    <div id="exp-section"></div>
   </div>
 
-  <div id="stock-section"></div>
-  <div id="recommend-section"></div>
-  <div id="quests-section"></div>
-  <div id="exp-section"></div>
+  <div id="tab-quests" class="tab-pane" role="tabpanel" hidden>
+    <div id="active-quests-section"></div>
+    <div id="quests-section"></div>
+  </div>
 
   <script src="app.js"></script>
   <footer style="text-align:center;padding:2rem 0 1rem;color:#444;font-size:.75rem;letter-spacing:.05em;">
