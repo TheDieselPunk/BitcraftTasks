@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.29.0';
+const APP_VERSION = '1.31.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -827,6 +827,7 @@ function sellerLine(s) {
 // "30× for ⬡5,100 — Solvenar (522h), stall: sfmason's Sturdy Barter Stall (Rumbagh T1 5)"
 function pickLine(pk) {
   return `${pk.units.toLocaleString()}× for ${HEX}${pk.cost.toLocaleString()} — ${pk.claim}` +
+    `${pk.away ? `, ${regionLabel(pk.region, pk.regionId)}` : ''}` +
     `${pk.dist != null ? ` (${pk.dist.toLocaleString()}h)` : ''}, ${sellerLine(pk)}`;
 }
 
@@ -938,18 +939,68 @@ const AQ_VERDICT = {
   buy:     'Can finish by buying',
   barter:  'Can finish with barter trades',
   craft:   'Can finish by crafting',
+  away:    'Can finish with one trip to',
   short:   'Missing items',
   game:    'Do this step in game',
   stale:   'Stage moved on in game — updating…',
 };
-const AQ_RANK = { ready: 0, housing: 1, pending: 2, buy: 3, barter: 4, craft: 5, short: 6, game: 7, stale: 8 };
-const AQ_DONE = new Set(['ready', 'housing', 'pending', 'buy', 'barter', 'craft']);
+const AQ_RANK = { ready: 0, housing: 1, pending: 2, buy: 3, barter: 4, craft: 5, away: 6, short: 7, game: 8, stale: 9 };
+const AQ_DONE = new Set(['ready', 'housing', 'pending', 'buy', 'barter', 'craft', 'away']);
 const AQ_FILTERS = [
   ['all',   'All',           () => true],
   ['done',  'Can complete',  q => AQ_DONE.has(q._verdict)],
   ['short', 'Missing items', q => q._verdict === 'short'],
   ['game',  'In game',       q => q._verdict === 'game'],
 ];
+
+// ── Regions ───────────────────────────────────────────────────────────────────
+// Quests are one-and-done, so when the player's region can't supply one, it may take one trip out: a single
+// other region's market (CLAIM.away), picked per quest. Every offer and stop shows its region like "Morven (R17)".
+const REGION_ICON = '<svg class="region-icon" viewBox="0 0 6 9" aria-hidden="true">' +
+  [1, 4.5, 8].map(y => `<circle cx="1.2" cy="${y}" r=".9"/><circle cx="4.8" cy="${y}" r=".9"/>`).join('') + '</svg>';
+
+function homeRegionId() {
+  return S.player?.regionId != null && S.player.regionId !== '' ? String(S.player.regionId) : null;
+}
+
+function regionLabel(name, id) {
+  return `${name || (id != null ? 'Region' : '')}${id != null ? ` (R${id})` : ''}`;
+}
+
+function regionTag(name, id) {
+  const label = regionLabel(name, id);
+  if (!label) return '';
+  const away = id != null && homeRegionId() && String(id) !== homeRegionId();
+  return `<span class="region-tag${away ? ' region-away' : ''}" data-tip="${esc(away ? 'Another region: one teleport there' : 'Your region')}">` +
+    `${REGION_ICON}${esc(label)}</span>`;
+}
+
+// An offer from the price lookup in the player's region
+function isHomeOffer(o) {
+  const home = homeRegionId();
+  if (home && o.region_id != null) return String(o.region_id) === home;
+  return !S.questRegion || o.region === S.questRegion;
+}
+
+// A market offer the quest being planned may use: its own region's, or the one region it takes a trip to
+function offerAllowed(o) {
+  return isHomeOffer(o) || (CLAIM?.away != null && String(o.region_id) === CLAIM.away);
+}
+
+// Other regions whose markets sell something quests need: [{id, name, dist}], nearest first
+function awayRegions() {
+  const out = new Map();
+  for (const list of Object.values(S.questOffers || {})) {
+    for (const o of list) {
+      if (o.source !== 'market' || o.region_id == null || isHomeOffer(o)) continue;
+      const d = playerDist(o.x, o.z);
+      const r = out.get(String(o.region_id));
+      if (!r) out.set(String(o.region_id), { id: String(o.region_id), name: o.region, dist: d });
+      else if (d != null && (r.dist == null || d < r.dist)) r.dist = d;
+    }
+  }
+  return [...out.values()].sort((a, b) => (a.dist ?? Infinity) - (b.dist ?? Infinity));
+}
 
 function playerDist(x, z) {
   const p = S.player;
@@ -1028,22 +1079,23 @@ function questNeedPlan(n, stallMap) {
     const pr = S.questPrices && S.questPrices !== 'loading' ? S.questPrices[n.id] : null;
     if (S.questOffers) {
       for (const o of S.questOffers[n.id] || []) {
-        if (o.source !== 'market' || (S.questRegion && o.region !== S.questRegion)) continue;
-        cands.push({ unit: o.price / o.bundle, units: o.units, kind: 'market', label: o.claim, seller: o.seller, dist: playerDist(o.x, o.z) });
+        if (o.source !== 'market' || !offerAllowed(o)) continue;
+        cands.push({ unit: o.price / o.bundle, units: o.units, kind: 'market', label: o.claim, seller: o.seller, dist: playerDist(o.x, o.z),
+                     region: o.region, regionId: o.region_id, away: !isHomeOffer(o) });
       }
     } else if (pr) {   // no route offers (no position): fall back on the lookup's own picks
       for (const pk of pr.picks.filter(pk => pk.source === 'market')) {
-        cands.push({ unit: pk.unit, units: pk.units, kind: 'market', label: pk.claim, seller: pk.seller, dist: pk.dist });
+        cands.push({ unit: pk.unit, units: pk.units, kind: 'market', label: pk.claim, seller: pk.seller, dist: pk.dist, ...homeRegion() });
       }
     }
     for (const e of entries.filter(e => !e.isHousing && coinOnly(e))) {
       cands.push({ unit: hexPrice(e.price_parts), units: e.stock == null ? Infinity : e.stock, kind: e.stand ? 'stand' : 'stall',
-                   label: e.claimName || e.name, seller: e.name, dist: e.distance, live: !!e.liveSpot });
+                   label: e.claimName || e.name, seller: e.name, dist: e.distance, live: !!e.liveSpot, ...homeRegion() });
     }
     cands.sort((a, b) => a.unit - b.unit || (a.dist ?? Infinity) - (b.dist ?? Infinity));
     for (const c of cands) {
       if (left <= 0) break;
-      const units = claim(`offer:${n.id}:${c.kind}:${c.label}:${c.seller}:${c.unit}`, c.units, left, held);
+      const units = claim(`offer:${n.id}:${c.kind}:${c.regionId ?? ''}:${c.label}:${c.seller}:${c.unit}`, c.units, left, held);
       if (units <= 0) continue;
       const cost = Math.round(units * c.unit);
       plan.buys.push({ ...c, units, cost });
@@ -1055,7 +1107,7 @@ function questNeedPlan(n, stallMap) {
       if (left <= 0) break;
       const units = claim(`trade:${n.id}:${e.claimName || e.name}:${e.name}`, e.stock == null ? Infinity : e.stock, left, held);
       if (units <= 0) continue;
-      plan.trades.push({ units, label: e.claimName || e.name, seller: e.name, dist: e.distance, price_parts: e.price_parts || [] });
+      plan.trades.push({ units, label: e.claimName || e.name, seller: e.name, dist: e.distance, price_parts: e.price_parts || [], ...homeRegion() });
       left -= units;
     }
     if (left > 0 && S.questPrices === 'loading') plan.pricing = true;
@@ -1072,6 +1124,11 @@ function questNeedPlan(n, stallMap) {
   return plan;
 }
 
+// Region fields for an offer in the player's own region (stalls and the lookup's own picks)
+function homeRegion() {
+  return { region: S.questRegion || S.player?.regionName || '', regionId: homeRegionId(), away: false };
+}
+
 // Travelers' Hex Coin trades for an item, as offers: no place or distance, since every traveler sells them
 function travelerOffers(id) {
   return (S.questTravelers?.[id] || []).map(t => ({ claim: `any ${t.traveler}`, source: 'traveler', seller: t.traveler,
@@ -1083,16 +1140,16 @@ function travelerOffers(id) {
 function repick(p, units, id, held) {
   let left = units, cost = 0;
   const picks  = [];
-  const region = (S.questOffers?.[id] || []).filter(o => !S.questRegion || o.region === S.questRegion);
+  const region = (S.questOffers?.[id] || []).filter(o => o.source === 'market' ? offerAllowed(o) : isHomeOffer(o));
   const offers = region.length
     ? region.map(o => ({ claim: o.claim, source: o.source, seller: o.seller, stand: o.stand, dist: playerDist(o.x, o.z),
-                         unit: Math.round(o.price / o.bundle), units: o.units }))
+                         unit: Math.round(o.price / o.bundle), units: o.units, region: o.region, regionId: o.region_id, away: !isHomeOffer(o) }))
         .concat(travelerOffers(id))
         .sort((a, b) => a.unit - b.unit || (a.dist ?? Infinity) - (b.dist ?? Infinity))
-    : p?.picks || [];
+    : (p?.picks || []).map(pk => pk.source === 'traveler' ? pk : { ...pk, ...homeRegion() });
   for (const pk of offers) {
     if (left <= 0) break;
-    const u = claim(`pick:${id}:${pk.claim}:${pk.seller}:${pk.unit}`, pk.units, left, held);
+    const u = claim(`pick:${id}:${pk.regionId ?? ''}:${pk.claim}:${pk.seller}:${pk.unit}`, pk.units, left, held);
     if (u <= 0) continue;
     picks.push({ ...pk, units: u, cost: u * pk.unit });
     cost += u * pk.unit;
@@ -1172,6 +1229,7 @@ function questVerdict(q) {
   if (q.stale) return 'stale';   // the relay says this stage is done; its next items are on the way
   if (!q.needs.length) return 'game';
   if (q._plans.some(p => p.short)) return 'short';
+  if (questShopping(q).some(p => p.away)) return 'away';
   if (q._plans.some(p => p.craft?.ok)) return 'craft';
   if (q._plans.some(p => p.trades.length)) return 'barter';
   if (q._plans.some(p => p.buys.length)) return 'buy';
@@ -1213,12 +1271,14 @@ function aqNeedHtml(n, p, sharedBy) {
   if (p.buys.length) {
     const units = p.buys.reduce((s, b) => s + b.units, 0);
     const tip = p.buys.map(b => `${b.units.toLocaleString()}× for ${HEX}${b.cost.toLocaleString()} — ${b.label}` +
+      `${b.away ? `, ${regionLabel(b.region, b.regionId)}` : ''}` +
       `${b.dist != null ? ` (${b.dist.toLocaleString()}h)` : ''}, ${b.kind}${b.seller && b.seller !== b.label ? `: ${b.seller}` : ''}` +
       `${b.kind === 'stand' && !b.live ? ` — ${STAND_NOTE}` : ''}`).join('\n');
     const where = [...new Set(p.buys.map(b => b.label))];
+    const away  = p.buys.find(b => b.away);
     tags.push(`<span class="aq-tag aq-tag-buy" data-tip="${esc(tip)}">buy ${units.toLocaleString()} for ${HEX}${p.cost.toLocaleString()} ` +
       `<span class="sub">${esc(where.length === 1 ? where[0] : `${where.length} places`)}</span>` +
-      `${p.buys.some(b => b.kind === 'stand' && !b.live) ? STAND_MARK : ''}</span>`);
+      `${p.buys.some(b => b.kind === 'stand' && !b.live) ? STAND_MARK : ''}${away ? regionTag(away.region, away.regionId) : ''}</span>`);
   }
   for (const t of p.trades) {
     const price = t.price_parts.map(pp => `${Math.round(pp.qty).toLocaleString()} ${pp.name}`).join(' + ');
@@ -1227,7 +1287,8 @@ function aqNeedHtml(n, p, sharedBy) {
   }
   if (p.pricing) tags.push(`<span class="dim">checking markets…</span>`);
   else if (p.short) {
-    const why = n.id === HEX_COIN_ID ? 'Hex Coin has to be earned' : 'Not for sale on your region\'s market or at the stalls in market range';
+    const why = n.id === HEX_COIN_ID ? 'Hex Coin has to be earned'
+      : "Not enough for sale on your region's market, at the stalls in market range, or on any one other region's market";
     tags.push(`<span class="aq-tag aq-tag-short" data-tip="${esc(why)}">${p.short.toLocaleString()} missing</span>`);
   }
   if (p.heldBy.size) tags.push(heldTag(p.heldBy));
@@ -1269,9 +1330,10 @@ function aqRecipeHtml(c) {
     }
     if (buy) {
       const where = [...new Set(i.bought.picks.map(pk => pk.claim))];
+      const away  = i.bought.picks.find(pk => pk.away);
       tags.push(`<span class="aq-tag aq-tag-buy" data-tip="${esc(i.bought.picks.map(pickLine).join('\n'))}">buy ${buy.toLocaleString()} for ` +
         `${HEX}${i.bought.cost.toLocaleString()} <span class="sub">${esc(where.length === 1 ? where[0] : `${where.length} places`)}</span>` +
-        `${i.bought.picks.some(pk => pk.stand) ? STAND_MARK : ''}</span>`);
+        `${i.bought.picks.some(pk => pk.stand) ? STAND_MARK : ''}${away ? regionTag(away.region, away.regionId) : ''}</span>`);
     }
     if (i.short) tags.push(`<span class="aq-tag aq-tag-short" data-tip="Not for sale on your region's market">${i.short.toLocaleString()} missing</span>`);
     if (i.heldBy.size) tags.push(heldTag(i.heldBy));
@@ -1291,9 +1353,11 @@ function aqRecipeHtml(c) {
 // crafts it can go ahead with. [{place, dist, cost, unsure, items: [{name, units, cost, from}]}], nearest first.
 function questShopping(q) {
   const at  = new Map();
-  const add = (place, dist, name, units, cost, from, unsure) => {
-    if (!at.has(place)) at.set(place, { place, dist, cost: 0, unsure: false, items: new Map() });
-    const p = at.get(place);
+  const add = (place, dist, name, units, cost, from, unsure, reg = {}) => {
+    const key = `${reg.regionId ?? ''}|${place}`;
+    if (!at.has(key)) at.set(key, { place, dist, cost: 0, unsure: false, items: new Map(),
+                                    region: reg.region || '', regionId: reg.regionId ?? null, away: !!reg.away });
+    const p = at.get(key);
     if (p.dist == null || (dist != null && dist < p.dist)) p.dist = dist;
     p.unsure ||= unsure;
     p.cost += cost || 0;
@@ -1306,7 +1370,7 @@ function questShopping(q) {
   };
   const crafted = c => {
     for (const i of c.ings) {
-      for (const pk of i.bought.picks) add(pk.claim, pk.dist, i.name, pk.units, pk.cost, sellerLine(pk), !!pk.stand);
+      for (const pk of i.bought.picks) add(pk.claim, pk.dist, i.name, pk.units, pk.cost, sellerLine(pk), !!pk.stand, pk);
       if (i.craft?.ok) crafted(i.craft);
     }
   };
@@ -1314,16 +1378,16 @@ function questShopping(q) {
     const p = q._plans[k];
     for (const b of p.buys) {
       add(b.label, b.dist, n.name, b.units, b.cost, `${b.kind}${b.seller && b.seller !== b.label ? `: ${b.seller}` : ''}`,
-          b.kind === 'stand' && !b.live);
+          b.kind === 'stand' && !b.live, b);
     }
     for (const t of p.trades) {
       const price = t.price_parts.map(pp => `${Math.round(pp.qty).toLocaleString()} ${pp.name}`).join(' + ');
-      add(t.label, t.dist, n.name, t.units, null, `trade: ${t.seller}${price ? ` (${price} each)` : ''}`, false);
+      add(t.label, t.dist, n.name, t.units, null, `trade: ${t.seller}${price ? ` (${price} each)` : ''}`, false, t);
     }
     if (p.craft?.ok) crafted(p.craft);
   });
   return [...at.values()].map(p => ({ ...p, items: [...p.items.values()] }))
-    .sort((a, b) => (a.dist ?? Infinity) - (b.dist ?? Infinity) || a.place.localeCompare(b.place));
+    .sort((a, b) => a.away - b.away || (a.dist ?? Infinity) - (b.dist ?? Infinity) || a.place.localeCompare(b.place));
 }
 
 function aqShoppingHtml(q) {
@@ -1337,11 +1401,18 @@ function aqShoppingHtml(q) {
       `<div class="aq-shop-row"><span class="aq-shop-place">${esc(p.place)}${p.unsure ? STAND_MARK : ''}` +
       `${p.dist != null ? ` <span class="sub">${p.dist.toLocaleString()}h</span>` : ''}</span>` +
       `<span class="aq-shop-cost">${p.cost ? `${HEX}${p.cost.toLocaleString()}` : ''}</span>` +
+      `${p.region || p.regionId != null ? `<span class="aq-shop-region">${regionTag(p.region, p.regionId)}</span>` : ''}` +
       `<span class="aq-shop-items">` + p.items.map(it =>
         `<span class="aq-shop-item" data-tip="${esc([...it.from].join('\n'))}">${it.units.toLocaleString()}× ${esc(it.name)}` +
         `${it.cost ? ` <span class="sub">${HEX}${it.cost.toLocaleString()}</span>` : it.trade ? ' <span class="sub">trade</span>' : ''}</span>`
       ).join('') + `</span></div>`
     ).join('') + `</div>`;
+}
+
+// The region a quest takes its one trip to, as a tag
+function awayTag(q) {
+  const p = questShopping(q).find(p => p.away);
+  return p ? ` ${regionTag(p.region, p.regionId)}` : '';
 }
 
 function renderActiveQuests(stallMap = buildStallMap()) {
@@ -1356,9 +1427,27 @@ function renderActiveQuests(stallMap = buildStallMap()) {
   // Each quest on its own first, to see which can be finished; then again in that order with shared stock, so
   // an item, a craft or a market listing counts for one quest only: quests that can be finished take theirs
   // first (tracked ones, then the cheaper ones, first among equals) and the rest get what's left
+  // A quest the region can't supply may take one trip out: tried against each other region's market (nothing
+  // used up yet), keeping the one that leaves the least missing, then the cheapest (nearest first among equals)
+  const regions = awayRegions();
+  const short   = ps => ps.reduce((s, p) => s + p.short, 0);
+  const spend   = ps => ps.reduce((s, p) => s + p.cost, 0);
   const planAll = q => {
-    CLAIM = { quest: q.name, keep: false, dry: false };
-    q._plans = q.needs.map(n => { CLAIM.keep = !n.consumed; return questNeedPlan(n, stallMap); });
+    const run = (away, dry) => {
+      CLAIM = { quest: q.name, keep: false, dry, away };
+      return q.needs.map(n => { CLAIM.keep = !n.consumed; return questNeedPlan(n, stallMap); });
+    };
+    let away = null;
+    if (!q.stale && regions.length && S.questPrices !== 'loading') {
+      const base = short(run(null, true));
+      let best = null;
+      if (base) for (const r of regions) {
+        const ps = run(r.id, true), s = short(ps), c = spend(ps);
+        if (s < base && (!best || s < best.s || (s === best.s && c < best.c))) best = { r, s, c };
+      }
+      away = best?.r.id ?? null;
+    }
+    q._plans = run(away, false);
     q._verdict = questVerdict(q);
   };
   LEDGER = null;
@@ -1382,13 +1471,15 @@ function renderActiveQuests(stallMap = buildStallMap()) {
     `then the cheapest coin offers on the ${S.questRegion || 'region'} market and at stalls and Trader Stands within ${range}h of ${claimName || 'you'},\n` +
     'then barter trades at those stalls. Anything still missing is crafted when you have the levels and every\n' +
     "ingredient can be had from your storage, added housing or the region's market (stalls included).\n" +
+    "A quest that still can't be finished looks at the other regions' markets, one region per quest,\n" +
+    'so it takes a single trip out: the region that leaves the least missing, then the cheapest.\n' +
     'Move the market range slider to look further for stalls.';
   aqSection.innerHTML =
     `<div class="aq-summary"><span class="exp-label" style="display:inline;margin:0">` +
     `<span data-tip="${esc(help)}" style="cursor:default;border-bottom:1px dotted #444466">Active quests</span></span>` +
     AQ_FILTERS.map(([k, label]) => counts[k] || k === 'all'
       ? `<button type="button" class="aq-filter${S.aqFilter === k ? ' active' : ''}" data-aqf="${k}">${label} <b>${counts[k]}</b></button>` : '').join('') +
-    `<span class="sub">Sources: your storage${houses}, ${esc(S.questRegion || 'region')} market, stalls within ${range}h` +
+    `<span class="sub">Sources: your storage${houses}, ${esc(S.questRegion || 'region')} market, stalls within ${range}h, one trip to another region` +
     `${S.questPrices === 'loading' ? ' · checking markets…' : ''}</span></div>` +
     `<div class="aq-list">` + show.map(q => {
       const total = q._plans.reduce((s, p) => s + p.cost, 0);
@@ -1403,7 +1494,7 @@ function renderActiveQuests(stallMap = buildStallMap()) {
         `<div class="aq-head"><span class="aq-name">${esc(q.name)}</span>${track}` +
         `<span class="aq-stagen">stage ${q.stage_index + 1} of ${q.total_stages || '?'}</span></div>` +
         `<div class="aq-stage">${esc(q.stage)}</div>` +
-        `<div class="aq-verdict">${AQ_VERDICT[q._verdict]}${cost}${extra}</div>` +
+        `<div class="aq-verdict">${AQ_VERDICT[q._verdict]}${q._verdict === 'away' ? awayTag(q) : ''}${cost}${extra}</div>` +
         needs +
         (q.rewards?.length ? `<div class="aq-rewards">Rewards: ${q.rewards.map(r => `<b>${esc(r)}</b>`).join(', ')}</div>` : '') +
         aqShoppingHtml(q) +
@@ -1499,6 +1590,7 @@ function planQuestRoute() {
   wants.forEach((w, wi) => {
     const byClaim = new Map();
     for (const o of S.questOffers[w.id] || []) {
+      if ((playerDist(o.x, o.z) ?? Infinity) > ROUTE_RADIUS_H) continue;   // far regions' markets are for one-trip quests
       const key = `${o.region}|${o.claim}`;
       if (!byClaim.has(key)) byClaim.set(key, []);
       byClaim.get(key).push(o);
@@ -1514,7 +1606,7 @@ function planQuestRoute() {
         left -= trades * o.bundle;
       }
       if (left > 0) continue;
-      if (!claims.has(key)) claims.set(key, { claim: list[0].claim, region: list[0].region, x: list[0].x, z: list[0].z, cost: [], from: [] });
+      if (!claims.has(key)) claims.set(key, { claim: list[0].claim, region: list[0].region, regionId: list[0].region_id, x: list[0].x, z: list[0].z, cost: [], from: [] });
       claims.get(key).cost[wi] = cost;
       claims.get(key).from[wi] = from;
     }
@@ -1557,7 +1649,7 @@ function planQuestRoute() {
       const leg = Math.round(dist(pos, c));
       pos = c;
       const buys = wants.map((w, wi) => ({ ...w, cost: c.cost[wi], from: c.from[wi] })).filter((w, wi) => r.done[w.qi] && r.at[wi] === c);
-      return { claim: c.claim, region: c.region, leg, buys };
+      return { claim: c.claim, region: c.region, regionId: c.regionId, leg, buys };
     }) };
   };
   // Best balance: the smallest sum of trip and cost, each relative to the best possible
@@ -1596,10 +1688,9 @@ function routeHtml() {
         const tip = s.buys.map(b => `${b.buy.toLocaleString()}× ${b.name} — ${HEX}${b.cost.toLocaleString()} (${b.quest})\n` +
                                     `    ${[...new Set(b.from.map(sellerLine))].join(', ')}`)
           .concat(`Spend here: ${HEX}${subtotal.toLocaleString()}`).join('\n');
-        const region = s.region && s.region !== S.questRegion ? `, ${s.region}` : '';
         const unsure = s.buys.some(b => b.from.some(o => o.stand)) ? STAND_MARK : '';
         return `${i ? '<span class="sub">→</span>' : ''}<span class="route-stop" data-tip="${esc(tip)}">${i + 1}. ${esc(s.claim)}${unsure}` +
-          `<span class="sub">${esc(region)} ${i ? '+' : ''}${s.leg.toLocaleString()}h</span></span>`;
+          `<span class="sub"> ${i ? '+' : ''}${s.leg.toLocaleString()}h</span>${regionTag(s.region, s.regionId)}</span>`;
       }).join('') +
       `</div>`
     ).join('') +
@@ -1918,15 +2009,16 @@ function startResetCountdown() {
 }
 
 // ── Live tasks, credits and inventory ─────────────────────────────────────────
-// BitJita's relay streams the game's own tables over SpacetimeDB's v1 JSON protocol, one database per
-// region. Rows come as JSON arrays in column order:
+// The live relays stream the game's own tables over SpacetimeDB's v1 JSON protocol, one database per
+// region. bitcraftsync's relay comes first: BitJita's reads through it, so BitJita's can't be up when
+// bitcraftsync's is down. BitJita's sends rows as JSON arrays in column order (bitcraftsync's as objects):
 //   traveler_task_state         [entity_id, player_entity_id, traveler_id, task_id, completed]
 //   traveler_task_credit_state  [entity_id, player_entity_id, traveler_id, credits, last_reset]
 //   inventory_state             [entity_id, pockets, inventory_index, cargo_index, owner_entity_id, player_owner_entity_id]
 // A hand-in, credits and the player's own containers in their region are applied straight away. The relay
 // only has ids, so a new task triggers a quiet reload of /api/tasks for its names, prices and stock.
 // Containers the relay doesn't hold (deployables, other regions, housing) keep BitJita's counts.
-const RELAYS          = [{ host: 'relay.bitjita.com' }, { host: 'relay.bitcraftsync.app', portBase: 3000 }];
+const RELAYS          = [{ host: 'relay.bitcraftsync.app', portBase: 3000 }, { host: 'relay.bitjita.com' }];
 const LIVE_RELOAD_MS  = 4000;                  // gather a burst of changes into one reload
 const LIVE_RETRY_MS   = [15000, 30000, 60000]; // BitJita can lag: reload again while new tasks are missing
 const LIVE_FILL_MS    = 60000;                 // a new task built from the pool gets the rest a minute later
@@ -1974,8 +2066,8 @@ function liveRelayUrl(i) {
   return `wss://${relay.host}${port}/v1/database/idc-${region}/subscribe?compression=None&light=true`;
 }
 
-// BitJita's relay first. The backup is only for when it doesn't answer: a failed attempt moves straight
-// on to the next relay, and once all have failed the page waits and starts over from BitJita's.
+// bitcraftsync's relay first. The backup is only for when it doesn't answer: a failed attempt moves straight
+// on to the next relay, and once all have failed the page waits and starts over from the first.
 function liveConnect(i = 0) {
   clearInterval(L.probeTimer);
   L.relay = i;
@@ -1988,7 +2080,7 @@ function liveConnect(i = 0) {
   ws.onmessage = e => liveMessage(ws, e.data);
   ws.onclose = () => {
     if (L.ws !== ws) return;
-    if (ws.gotData) liveRetry();   // dropped after working: start over from BitJita's relay
+    if (ws.gotData) liveRetry();   // dropped after working: start over from the first relay
     else liveNextRelay(i);         // never answered: try the next relay now
   };
 }
@@ -2007,7 +2099,7 @@ function liveRetry() {
   L.retryTimer = setTimeout(() => { if (L.key) liveConnect(0); }, wait);
 }
 
-// While on the backup, check BitJita's relay every couple of minutes and move back once it answers
+// While on the backup, check the first relay every couple of minutes and move back once it answers
 const LIVE_PROBE_MS = 120000;
 function liveProbePrimary() {
   clearInterval(L.probeTimer);
@@ -2406,9 +2498,9 @@ function liveSetStatus(state, why = '') {
   liveEl.innerHTML = `<span class="live-dot"></span>${label}`;
   liveEl.title     = why || {
     live:       `Connected to the live relay (${RELAYS[L.relay % RELAYS.length].host}): tasks, task credits and the inventory in your region update as you play`,
-    connecting: 'Connecting to BitJita’s live relay…',
-    retrying:   'Lost the connection to BitJita’s live relay; retrying. Refresh still works.',
-    off:        'Not connected to BitJita’s live relay. Refresh to update tasks.',
+    connecting: 'Connecting to the live relay…',
+    retrying:   'Lost the connection to the live relay; retrying. Refresh still works.',
+    off:        'Not connected to the live relay. Refresh to update tasks.',
   }[state];
 }
 

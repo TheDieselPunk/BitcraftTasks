@@ -19,9 +19,10 @@ Returns:
     per_craft = units one craft makes; per = how many of the ingredient one craft uses
     an ingredient that isn't for sale has its own craft (same shape), up to CRAFT_DEPTH levels deep
     where = [{qty, label, container, place, elsewhere}]: the player's containers holding the ingredient
-  - offers: {id: [{claim, region, x, z, price, bundle, units, source, seller, stand}]}: for the items and the
-    crafting ingredients priced, every offer within
-    ROUTE_RADIUS of the player in any region, for planning a shopping route (price is per bundle)
+  - offers: {id: [{claim, region, region_id, x, z, price, bundle, units, source, seller, stand}]}: for the items
+    and the crafting ingredients priced, every offer within ROUTE_RADIUS of the player in any region, for planning
+    a shopping route, plus every region's market orders (at that region's market nearest the player), for quests
+    the player's region can't supply: one trip to another region's market (price is per bundle)
   - travelers: {id: [{traveler, price, bundle}]}: travelers' Hex Coin trades for the items and ingredients priced
   - region: region name
 """
@@ -261,16 +262,17 @@ class Sources:
         self.region      = ''
         self.by_key      = {}
 
-    def keep(self, region_of, x, z):
-        """In the player's region (for prices) or close enough for a shopping route."""
+    def keep(self, region_of, x, z, hub=False):
+        """In the player's region (for prices), close enough for a shopping route, or a region's market (hub)."""
         in_region = not self.region_id or str(region_of) == self.region_id
         d = dist_h(self.px, self.pz, x, z)
-        return in_region or (d is not None and d <= ROUTE_RADIUS), in_region, d
+        return in_region or hub or (d is not None and d <= ROUTE_RADIUS), in_region, d
 
-    def add(self, key, in_region, d, region, **source):
+    def add(self, key, in_region, d, region, region_id=None, **source):
         if in_region:
             self.region = self.region or region
-        self.by_key.setdefault(key, []).append({**source, 'dist': d, 'region': region, 'in_region': in_region})
+        self.by_key.setdefault(key, []).append({**source, 'dist': d, 'region': region, 'in_region': in_region,
+                                                'region_id': None if region_id is None else str(region_id)})
 
     def add_market(self, key, orders):
         # Every market in a region shares the region's listings, so buy at the region's market nearest the player
@@ -278,14 +280,14 @@ class Sources:
             hub = self.hubs.get(str(o.get('regionId')))
             if hub:
                 o = {**o, 'claimName': hub['name'], 'claimLocationX': hub['x'], 'claimLocationZ': hub['z']}
-            ok, in_region, d = self.keep(o.get('regionId'), o.get('claimLocationX'), o.get('claimLocationZ'))
+            ok, in_region, d = self.keep(o.get('regionId'), o.get('claimLocationX'), o.get('claimLocationZ'), bool(hub))
             if not ok or (o.get('ownerUsername') or '').lower() == self.me:
                 continue
             try:
                 price, units = int(o['priceThreshold']), int(o['quantity'])
             except (KeyError, TypeError, ValueError):
                 continue
-            self.add(key, in_region, d, o.get('regionName') or '', bundle=1, price=price, units=units,
+            self.add(key, in_region, d, o.get('regionName') or '', o.get('regionId'), bundle=1, price=price, units=units,
                      claim=o.get('claimName', ''), source='market', seller=o.get('ownerUsername') or '', stand=False,
                      x=o.get('claimLocationX'), z=o.get('claimLocationZ'))
 
@@ -312,7 +314,7 @@ class Sources:
             if not caps or min(caps) <= 0:
                 continue
             _, in_region, d = self.keep(st.get('regionId'), st.get('locationX'), st.get('locationZ'))
-            self.add(o['key'], in_region, d, st.get('regionName') or '', bundle=o['bundle'], price=o['price'],
+            self.add(o['key'], in_region, d, st.get('regionName') or '', st.get('regionId'), bundle=o['bundle'], price=o['price'],
                      units=min(caps), claim=st['claimName'], source='stall',
                      seller=stall_label(st, claim_inv), stand=bool(st.get('nickname')),   # only Trader Stands have one
                      x=st.get('locationX'), z=st.get('locationZ'))
@@ -440,11 +442,12 @@ class handler(BaseHTTPRequestHandler):
                         if ing['short'] and ik not in above:   # no recipe loops
                             pending.append((ik, ing, above | {ik}))
 
-            route_fields = ('claim', 'region', 'x', 'z', 'price', 'bundle', 'units', 'source', 'seller', 'stand')
+            route_fields = ('claim', 'region', 'region_id', 'x', 'z', 'price', 'bundle', 'units', 'source', 'seller', 'stand')
             self._send(200, {
                 'items':    items,
                 'offers':   {k[0]: [{f: s[f] for f in route_fields} for s in src.by_key.get(k, [])
-                                    if s['dist'] is not None and s['dist'] <= ROUTE_RADIUS] for k in priced},
+                                    if s['source'] == 'market' and s['x'] is not None
+                                    or s['dist'] is not None and s['dist'] <= ROUTE_RADIUS] for k in priced},
                 'travelers': {k[0]: [{'traveler': t['traveler'], 'price': t['price'], 'bundle': t['bundle']}
                                      for t in trades.get(k, [])] for k in priced if trades.get(k)},
                 'region':   src.region,

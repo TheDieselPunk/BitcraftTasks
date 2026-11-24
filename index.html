@@ -314,6 +314,16 @@
     .aq-shop-cost { color: #f0a500; font-weight: 700; text-align: right; white-space: nowrap; }
     .aq-shop-items { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 1px 10px; padding-left: 10px; color: #c8c8dc; }
     .aq-shop-item { cursor: default; border-bottom: 1px dotted #444466; }
+    .aq-shop-region { grid-column: 1 / -1; padding-left: 10px; margin: -1px 0 1px; }
+    .aq-card.aq-away    { border-left-color: #e8a24a; }
+    .aq-away .aq-verdict { color: #e8a24a; }
+    /* Region badge, like "⠿ Morven (R17)": grey in your region, amber for a trip to another */
+    .region-tag   { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; color: #8888aa; font-size: .64rem;
+                    font-weight: 400; text-transform: none; letter-spacing: 0; white-space: nowrap; cursor: default; }
+    .aq-shop-region .region-tag, .aq-verdict .region-tag { margin-left: 0; }
+    .aq-verdict .region-tag { font-size: .7rem; font-weight: 700; }
+    .region-icon  { width: 6px; height: 9px; fill: currentColor; opacity: .75; flex: none; }
+    .region-away  { color: #e8a24a; }
     .exp-label   { color: #666688; font-size: .75rem; margin-right: 4px; }
     .exp-chip    { background: #0f0f28; border: 1px solid #2a2a5a; border-radius: 12px; padding: 3px 10px; font-size: .75rem; display: inline-flex; gap: 6px; }
     .exp-skill   { color: #b47cff; }
