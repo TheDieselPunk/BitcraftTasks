@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(__file__))
 from recommend import pages, read_tasks, task_pool, unlocked_tiers
+import _relay
 CACHE_S = 60   # seconds Vercel's CDN may serve this response from cache
 
 from _lib import api_get, build_inv_map, build_inv_detail_map, build_name_maps, get_craft_info, get_player_housing_items, get_skill_levels, merge_housing, cors_headers, \
@@ -327,6 +328,65 @@ def build_pending_crafts(crafts, passive, items_map, cargo_map):
     return pending, recipes
 
 
+def relay_player_state(player_id, region_id, catalog, quest_catalog):
+    """
+    The player's tasks, task credits and quests read off the live relay, in the shape of BitJita's
+    /players/{id}/traveler-tasks and /players/{id}/quests. BitJita sometimes answers with none at all (while its
+    relay reloads), so these stand in. The relay only has ids: names, items and stages come from the catalogs.
+    catalog = (task rows, first page) from /api/traveler-tasks; quest_catalog = /api/quests rows.
+    Returns (tasks_data, my_quests), either None if the relay has nothing for the player.
+    """
+    pid = int(player_id)
+    t = _relay.snapshot(int(region_id), [
+        f'SELECT * FROM traveler_task_state WHERE player_entity_id = {pid}',
+        f'SELECT * FROM traveler_task_credit_state WHERE player_entity_id = {pid}',
+        f'SELECT * FROM quest_chain_state WHERE player_entity_id = {pid}',
+    ])
+
+    def secs(v):   # a SpacetimeDB timestamp may come as a number or wrapped
+        if isinstance(v, dict):
+            v = next(iter(v.values()), 0)
+        if isinstance(v, list):
+            v = v[-1] if v else 0
+        v = int(v or 0)
+        return v // 1_000_000 if v > 10**12 else v
+
+    rows, first = catalog or ([], {})
+    by_task = {r.get('id'): r for r in rows}
+    tasks = [{**by_task[r['task_id']], 'taskId': r['task_id'], 'travelerId': r['traveler_id'],
+              'entityId': r['entity_id'], 'completed': bool(r.get('completed'))}
+             for r in t.get('traveler_task_state') or [] if r.get('task_id') in by_task]
+    credits = {str(r['traveler_id']): {'credits': r.get('credits', 0), 'lastReset': secs(r.get('last_reset'))}
+               for r in t.get('traveler_task_credit_state') or []}
+    tasks_data = {'tasks': tasks, 'taskCredits': credits, 'items': first.get('items') or {},
+                  'cargo': first.get('cargo') or {}} if tasks or credits else None
+
+    by_quest = {q.get('id'): q for q in quest_catalog or []}
+    quests = []
+    for r in t.get('quest_chain_state') or []:
+        q = by_quest.get(r.get('quest_chain_desc_id'))
+        if not q:
+            continue
+        stages  = q.get('stages') or []
+        details = {s.get('id'): s for s in q.get('stageDetails') or []}
+        stage   = details.get(r.get('stage_id')) or {}
+        quests.append({
+            'questChainDescId':        q.get('id'),
+            'questName':               q.get('name') or '',
+            'completed':               bool(r.get('completed')),
+            'tracked':                 bool(r.get('tracked')),
+            'stageId':                 r.get('stage_id'),
+            'currentStageName':        stage.get('name') or '',
+            'currentStageIndex':       stages.index(r.get('stage_id')) if r.get('stage_id') in stages else 0,
+            'totalStages':             len(stages),
+            'currentStageConditions':  stage.get('completionConditions') or [],
+            'rewards':                 q.get('rewards') or [],
+            'implicitRewards':         q.get('implicitRewards') or [],
+        })
+    my_quests = {'quests': quests, 'items': {}, 'skills': {str(k): v for k, v in SKILL_NAMES.items()}} if quests else None
+    return tasks_data, my_quests
+
+
 def build_credits(tasks_data):
     """
     Per-traveler task credits from the traveler-tasks response.
@@ -527,6 +587,19 @@ class handler(BaseHTTPRequestHandler):
                     except Exception:
                         results[key] = {} if key in ('tasks', 'inv', 'my_quests', 'levels', 'crafts', 'passive') else ([], {}) if key == 'catalog' else []
                         warnings.append(f'Could not load {_warn_names.get(key, key)} from BitJita')
+
+            # BitJita sometimes has no tasks or quests for a player at all (while its relay reloads): read
+            # them off the live relay instead
+            if region_id and (not (results.get('tasks') or {}).get('tasks') or not (results.get('my_quests') or {}).get('quests')):
+                try:
+                    live_tasks, live_quests = relay_player_state(player_id, region_id, results.get('catalog'),
+                                                                 results.get('quests'))
+                except Exception:
+                    live_tasks = live_quests = None
+                if live_tasks and not (results.get('tasks') or {}).get('tasks'):
+                    results['tasks'] = {**(results.get('tasks') or {}), **live_tasks}
+                if live_quests and not (results.get('my_quests') or {}).get('quests'):
+                    results['my_quests'] = live_quests
 
             tasks_data   = results.get('tasks', {})
             inv_data     = results.get('inv', {})
