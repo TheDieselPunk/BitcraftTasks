@@ -191,7 +191,8 @@
     .stock-cover span { font-size: .7rem; }
     .stock-row    { display: grid; grid-template-columns: minmax(0, 1fr) 90px auto; gap: 8px; align-items: center; padding: 2px 0; cursor: default; }
     .stock-name   { color: #c8c8dc; font-size: .7rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .stock-bar    { height: 7px; background: #15152e; border-radius: 4px; overflow: hidden; }
+    .stock-bar    { height: 7px; background: #15152e; border-radius: 4px; overflow: hidden; position: relative; }
+    .stock-mark   { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #c8c8dc; opacity: .7; }
     .stock-fill   { display: block; height: 100%; border-radius: 4px; }
     .stock-ok     { background: #52c46a; }
     .stock-part   { background: #f0a500; }

@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.28.0';
+const APP_VERSION = '1.29.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -529,9 +529,11 @@ creditsSection.addEventListener('click', e => {
 });
 
 // ── Weekly task stock ─────────────────────────────────────────────────────────
-// How much of each pool item the rest of the week's task credits will ask for, from the task rules:
+// How much of each pool item the rest of this week's task credits plus next week's full refill will ask
+// for, so stock is built up ahead of the reset rather than only for what's left. From the task rules:
 // a traveler shows 4 tasks; a finished task is replaced by a random pool task that isn't the one just
-// finished and shares no item with the other 3. Simulated many times from the tasks held now.
+// finished and shares no item with the other 3. Tasks don't expire, so both weeks are one chain of
+// hand-ins, simulated many times from the tasks held now.
 const TASK_SLOTS       = 4;
 const CREDITS_PER_TASK = 1;     // credits a hand-in uses
 const STOCK_RUNS       = 400;   // simulated weeks per traveler
@@ -578,35 +580,46 @@ function simulateWeek(pool, start, handins, rand, pick) {
   return { done, choices };
 }
 
-// Per traveler: expected demand per item if tasks are handed in in any order, and how many hand-ins
-// the player's own stock covers if they always hand in the task they hold the most of
+// Per traveler: expected demand per item over this week and next if tasks are handed in in any order, and
+// how many hand-ins the player's own stock covers if they always hand in the task they hold the most of
 function stockEstimate(traveler, pool) {
   const credit  = S.credits.find(c => c.traveler === traveler);
   const handins = Math.floor((credit?.credits ?? credit?.weekly ?? 0) / CREDITS_PER_TASK);
+  const next    = Math.floor((credit?.weekly ?? 0) / CREDITS_PER_TASK);
+  const total   = handins + next;
   const byId    = new Map(pool.map(t => [String(t.id), t]));
   const start   = S.tasks.filter(t => t.traveler === traveler && byId.has(String(t.id))).map(t => byId.get(String(t.id)));
   const items   = new Map();   // item id → {name, have, need, perTask: [qty]}
   for (const t of pool) for (const i of t.items) {
-    const it = items.get(i.id) || { id: i.id, name: i.name, have: i.have, need: 0, tasks: 0 };
+    const it = items.get(i.id) || { id: i.id, name: i.name, have: i.have, need: 0, needNow: 0, tasks: 0 };
     it.tasks++;
     items.set(i.id, it);
   }
 
-  const rand = rng(pool.length * 7919 + handins);
+  const rand = rng(pool.length * 7919 + total);
   let choices = 0;
   for (let r = 0; r < STOCK_RUNS; r++) {
-    const w = simulateWeek(pool, start, handins, rand, board => Math.floor(rand() * board.length));
+    const w = simulateWeek(pool, start, total, rand, board => Math.floor(rand() * board.length));
     choices = Math.max(choices, w.choices);
-    for (const t of w.done) for (const i of t.items) items.get(i.id).need += i.qty;
+    w.done.forEach((t, n) => {
+      for (const i of t.items) {
+        const it = items.get(i.id);
+        it.need += i.qty;
+        if (n < handins) it.needNow += i.qty;
+      }
+    });
   }
-  for (const it of items.values()) it.need = Math.ceil(it.need / STOCK_RUNS);
+  for (const it of items.values()) {
+    it.need    = Math.ceil(it.need / STOCK_RUNS);
+    it.needNow = Math.min(it.need, Math.ceil(it.needNow / STOCK_RUNS));
+  }
 
   // Steering: hand in the held task the stock lasts longest for; stop when nothing held can be handed in
   let covered = 0;
   for (let r = 0; r < STOCK_RUNS; r++) {
     const left = new Map([...items.values()].map(it => [it.id, it.have]));
     const lasts = t => Math.min(...t.items.map(i => Math.floor(left.get(i.id) / i.qty)));
-    const w = simulateWeek(pool, start, handins, rand, board => {
+    const w = simulateWeek(pool, start, total, rand, board => {
       let best = -1;
       board.forEach((t, k) => { if (lasts(t) > 0 && (best < 0 || lasts(t) > lasts(board[best]))) best = k; });
       if (best >= 0) for (const i of board[best].items) left.set(i.id, left.get(i.id) - i.qty);
@@ -616,20 +629,26 @@ function stockEstimate(traveler, pool) {
   }
 
   return {
-    traveler, handins, pool: pool.length, choices, forced: choices <= 1,
+    traveler, handins, next, total, pool: pool.length, choices, forced: choices <= 1,
     covered: Math.round(covered / STOCK_RUNS),
     items: [...items.values()].sort((a, b) => b.need - a.need || a.name.localeCompare(b.name)),
   };
 }
 
-function stockBar(it, handins) {
+function stockBar(it, e) {
   const pct  = it.need ? Math.min(100, it.have / it.need * 100) : 100;
   const cls  = it.have >= it.need ? 'ok' : it.have > 0 ? 'part' : 'none';
-  const tip  = `${it.name}\nYou have ${it.have.toLocaleString()}; your ${handins} remaining hand-ins are expected to ask for ` +
-               `${it.need.toLocaleString()}\n(in ${it.tasks} of the traveler's tasks, handed in in no particular order)`;
+  const tip  = `${it.name}\nYou have ${it.have.toLocaleString()}; expected to be asked for ${it.need.toLocaleString()} ` +
+               `over your next ${e.total} hand-ins:\n` +
+               (e.handins ? `  ${it.needNow.toLocaleString()} for the ${e.handins} left this week\n` : '') +
+               (e.next ? `  ${(it.need - it.needNow).toLocaleString()} for next week's ${e.next}\n` : '') +
+               `(in ${it.tasks} of the traveler's tasks, handed in in no particular order)` +
+               (e.handins && it.needNow ? `\nThe tick marks this week's share.` : '');
+  const mark = e.handins && e.next && it.needNow && it.needNow < it.need
+    ? `<span class="stock-mark" style="left:${it.needNow / it.need * 100}%"></span>` : '';
   return `<div class="stock-row" data-tip="${esc(tip)}">` +
     `<span class="stock-name">${esc(it.name)}</span>` +
-    `<span class="stock-bar"><span class="stock-fill stock-${cls}" style="width:${pct}%"></span></span>` +
+    `<span class="stock-bar"><span class="stock-fill stock-${cls}" style="width:${pct}%"></span>${mark}</span>` +
     `<span class="stock-num stock-${cls}-t">${it.have.toLocaleString()}<span class="sub"> / ${it.need.toLocaleString()}</span></span>` +
   `</div>`;
 }
@@ -637,30 +656,37 @@ function stockBar(it, handins) {
 function renderStock() {
   const pools = Object.entries(S.pool || {});
   if (!pools.length) { stockSection.innerHTML = ''; return; }
-  const help = 'Items the travelers can ask for this week: every task in the tiers you have unlocked.\n' +
-               `Bars show what you have over what your remaining task credits (${CREDITS_PER_TASK} per hand-in) are expected to ask for,\n` +
-               `from ${STOCK_RUNS} simulated weeks that start with the tasks you hold now. A finished task is replaced by a\n` +
+  const help = 'Items the travelers can ask for: every task in the tiers you have unlocked.\n' +
+               `Bars show what you have over what your task credits (${CREDITS_PER_TASK} per hand-in) are expected to ask for:\n` +
+               'what\'s left this week plus next week\'s full refill, so you can stock up ahead of the reset.\n' +
+               'The tick on a bar marks this week\'s share. Tasks don\'t expire, so both weeks are simulated as one\n' +
+               `run of hand-ins, ${STOCK_RUNS} times, starting with the tasks you hold now. A finished task is replaced by a\n` +
                'random task that isn\'t the one just handed in and uses none of the items on the other 3 tasks.\n' +
                '"Your stock covers" assumes you always hand in the task you have the most of, so the new tasks\n' +
                'keep coming from what you can do. In a pool of 5, the task that comes back is always the one\n' +
                'not on the board, so you can alternate two tasks all week.';
   stockSection.innerHTML =
-    `<div class="exp-label"><span data-tip="${esc(help)}" style="cursor:default;border-bottom:1px dotted #444466">Stock for this week's tasks</span></div>` +
+    `<div class="exp-label"><span data-tip="${esc(help)}" style="cursor:default;border-bottom:1px dotted #444466">Stock for this week and next</span></div>` +
     `<div class="stock-grid">` +
     pools.sort(([a], [b]) => a.localeCompare(b)).map(([trav, pool]) => {
       const e = stockEstimate(trav, pool);
-      if (!e.handins) {
+      if (!e.total) {
         return `<div class="stock-card"><div class="stock-head"><span class="quest-trav">${esc(trav)}</span>` +
-               `<span class="sub">no credits left this week</span></div></div>`;
+               `<span class="sub">no task credits</span></div></div>`;
       }
-      const cov  = e.covered >= e.handins ? 'inv-ok' : e.covered ? 'inv-part' : 'quest-short';
-      const mode = e.forced ? `<span class="stock-forced" data-tip="${esc(`Only ${e.pool} tasks: each hand-in brings back the task that isn't on the board,\nso you choose what comes next. Alternate two tasks you have items for:\n${Math.ceil(e.handins / 2)} hand-ins of each covers the week.`)}">steerable</span>`
+      const cov  = e.covered >= e.total ? 'inv-ok' : e.covered ? 'inv-part' : 'quest-short';
+      const mode = e.forced ? `<span class="stock-forced" data-tip="${esc(`Only ${e.pool} tasks: each hand-in brings back the task that isn't on the board,\nso you choose what comes next. Alternate two tasks you have items for:\n${Math.ceil(e.total / 2)} hand-ins of each covers both weeks.`)}">steerable</span>`
                             : `<span class="sub" data-tip="${esc(`Each new task is drawn from up to ${e.choices} that fit the rules`)}">random pick of ${e.choices}</span>`;
+      const left = e.handins ? `${e.handins} left this week` : 'this week done';
+      const covNow  = Math.min(e.covered, e.handins);
+      const covNext = Math.min(Math.max(0, e.covered - e.handins), e.next);
+      const split = e.handins && e.next
+        ? ` <span class="sub">(this week ${covNow}/${e.handins} · next ${covNext}/${e.next})</span>` : '';
       return `<div class="stock-card">` +
         `<div class="stock-head"><span class="quest-trav">${esc(trav)}</span>` +
-        `<span class="sub">${e.handins} hand-ins left · ${e.pool} tasks</span>${mode}</div>` +
-        `<div class="stock-cover">Your stock covers <span class="${cov}">${Math.min(e.covered, e.handins)} of ${e.handins}</span></div>` +
-        e.items.map(it => stockBar(it, e.handins)).join('') +
+        `<span class="sub">${left} · ${e.next} next week · ${e.pool} tasks</span>${mode}</div>` +
+        `<div class="stock-cover">Your stock covers <span class="${cov}">${Math.min(e.covered, e.total)} of ${e.total}</span>${split}</div>` +
+        e.items.map(it => stockBar(it, e)).join('') +
       `</div>`;
     }).join('') +
     `</div>`;
