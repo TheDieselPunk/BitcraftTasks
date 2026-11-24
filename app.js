@@ -1,6 +1,6 @@
 'use strict';
 
-const APP_VERSION = '1.27.0';
+const APP_VERSION = '1.28.0';
 const HEX = '⬡';
 // Trader Stands can be moved or packed away, and BitJita only gives the claim they're listed under
 const STAND_NOTE = 'may not be there';
@@ -913,11 +913,10 @@ const AQ_VERDICT = {
   barter:  'Can finish with barter trades',
   craft:   'Can finish by crafting',
   short:   'Missing items',
-  level:   'Needs a higher skill level',
   game:    'Do this step in game',
   stale:   'Stage moved on in game — updating…',
 };
-const AQ_RANK = { ready: 0, housing: 1, pending: 2, buy: 3, barter: 4, craft: 5, short: 6, level: 6, game: 7, stale: 8 };
+const AQ_RANK = { ready: 0, housing: 1, pending: 2, buy: 3, barter: 4, craft: 5, short: 6, game: 7, stale: 8 };
 const AQ_DONE = new Set(['ready', 'housing', 'pending', 'buy', 'barter', 'craft']);
 const AQ_FILTERS = [
   ['all',   'All',           () => true],
@@ -1146,7 +1145,6 @@ function takeCrafting(id, left, into, held) {
 function questVerdict(q) {
   if (q.stale) return 'stale';   // the relay says this stage is done; its next items are on the way
   if (!q.needs.length) return 'game';
-  if ((q.levels || []).some(l => l.have < l.level)) return 'level';
   if (q._plans.some(p => p.short)) return 'short';
   if (q._plans.some(p => p.craft?.ok)) return 'craft';
   if (q._plans.some(p => p.trades.length)) return 'barter';
@@ -1375,16 +1373,10 @@ function renderActiveQuests(stallMap = buildStallMap()) {
       AQ_CARD = q.name;
       const needs = q.stale ? '' : q.needs.map((n, i) => aqNeedHtml(n, q._plans[i], [...new Set(users[n.id].filter(x => x !== q.name))])).join('');
       const track = q.tracked ? `<span class="aq-track" data-tip="Tracked in game">★</span>` : '';
-      // Traveler trades listed as quests (the next house deed) need skill levels rather than a quest stage
-      const step  = q.source
-        ? `<span class="aq-stagen" data-tip="${esc(`Not a quest: the next of ${q.traveler}'s ${q.total_stages} house deed trades you can buy`)}">${esc(q.traveler)} · ${esc(q.source)}</span>`
-        : `<span class="aq-stagen">stage ${q.stage_index + 1} of ${q.total_stages || '?'}</span>`;
-      const levels = (q.levels || []).map(l => l.have >= l.level
-        ? ` <span class="sub">${esc(l.skill)} ${l.level} ✓</span>`
-        : ` <span class="aq-tag aq-tag-short">needs ${esc(l.skill)} ${l.level} (you have ${l.have})</span>`).join('');
       return `<div class="aq-card aq-${q._verdict}">` +
-        `<div class="aq-head"><span class="aq-name">${esc(q.name)}</span>${track}${step}</div>` +
-        `<div class="aq-stage">${esc(q.stage)}${levels}</div>` +
+        `<div class="aq-head"><span class="aq-name">${esc(q.name)}</span>${track}` +
+        `<span class="aq-stagen">stage ${q.stage_index + 1} of ${q.total_stages || '?'}</span></div>` +
+        `<div class="aq-stage">${esc(q.stage)}</div>` +
         `<div class="aq-verdict">${AQ_VERDICT[q._verdict]}${cost}${extra}</div>` +
         needs +
         (q.rewards?.length ? `<div class="aq-rewards">Rewards: ${q.rewards.map(r => `<b>${esc(r)}</b>`).join(', ')}</div>` : '') +
